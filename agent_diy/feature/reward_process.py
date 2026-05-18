@@ -13,7 +13,22 @@ from agent_diy.conf.conf import GameConfig
 
 
 TOWER_SUB_TYPES = {21, "21", "ACTOR_SUB_TOWER"}
-SOLDIER_SUB_TYPES = {1, "1", "ACTOR_SUB_SOLDIER"}
+SOLDIER_SUB_TYPES = {1, "1", 11, "11", "ACTOR_SUB_SOLDIER"}
+SKILL_HIT_HERO_REWARD_KEYS = {
+    (112, 1): "luban_skill1_hit_enemy_hero",
+    (112, 2): "luban_skill2_hit_enemy_hero",
+    (112, 3): "luban_skill3_hit_enemy_hero",
+    (133, 1): "direnjie_skill1_hit_enemy_hero",
+    (133, 3): "direnjie_skill3_hit_enemy_hero",
+}
+SKILL_HIT_REWARD_KEYS = set(SKILL_HIT_HERO_REWARD_KEYS.values()) | {
+    "luban_skill1_hit_enemy_soldier",
+    "direnjie_skill3_followup_damage",
+}
+SCENARIO_REWARD_KEYS = {
+    "minion_tower_push",
+    "enemy_dead_enemy_cake",
+}
 
 
 class RewardStruct:
@@ -53,7 +68,8 @@ def _safe_div(num, den, default=0.0):
 
 
 def _loc(obj):
-    location = _get(obj or {}, "location", {}) or {}
+    collider = _get(obj or {}, "collider", {}) or {}
+    location = _get(collider, "location", None) or _get(obj or {}, "location", {}) or {}
     return float(_get(location, "x", 0)), float(_get(location, "z", 0))
 
 
@@ -77,26 +93,51 @@ class GameRewardManager:
         self.m_each_level_max_exp = {}
         self.has_last_frame = False
         self.m_last_hit_debug = self._empty_last_hit_debug()
-        # Cleanse detection state for 133v133 mirror matchups.
-        self.prev_main_ult_buffs = set()
-        self.prev_enemy_ult_buffs = set()
+        self._main_ult_hit_frame = -99999
+        self._enemy_ult_hit_frame = -99999
         self._cleanse_main_count = 0
         self._cleanse_enemy_count = 0
+        self._skill2_misuse_count = 0
         # Skill-hit detection state. slot3_armed/credit/frame tracked per side so
         # Luban ult bullet-farm only credits once per cast cycle.
         self._skill_hit_main_count = 0
         self._skill_hit_enemy_count = 0
+        self._skill_hit_reward_counts = self._empty_skill_hit_reward_counts()
         self.slot3_armed = {"main": False, "enemy": False}
         self.slot3_credit_used = {"main": False, "enemy": False}
         self.slot3_armed_frame = {"main": -10000, "enemy": -10000}
+        self.last_luban_skill1_action_context = None
+        self.pending_luban_skill1_frame = None
+        self.pending_luban_skill1_aim_pos = None
+        self.pending_luban_skill1_target_runtime = None
+        self.pending_luban_skill1_hit_soldiers = set()
+        self.prev_enemy_soldier_hp = {}
+        self.pending_direnjie_skill3_followup_frame = None
+        self.pending_direnjie_skill3_followup_used = False
         # Cake pickup detection: track cake positions and main hero HP from previous frame.
         self.prev_cake_locs = set()
         self.prev_main_hp = None
         self._cake_pickup_count = 0
-        # Recover-skill-at-low-HP detection (slot 4 use while hp_rate < 0.5).
+        # Recover-skill-at-low-HP detection: record low-HP attempts and settle
+        # after a short window only if HP actually rises.
         self._recover_low_hp_count = 0
+        self._pending_recover = None
+        self._recover_debug = self._empty_recover_debug()
         # Safe last_hit detection (last_hit while inside own tower attack range).
         self._safe_last_hit_count = 0
+        # Berserk timing: wait a short window after 80110 usage and reward only
+        # if it is followed by actual close-range combat.
+        self._pending_berserk_frame = None
+        self._berserk_timing_value = 0.0
+        # Low-frequency scenario shaping around minion-tanked tower pushes and
+        # enemy-dead cake invades.
+        self._minion_tower_push_value = 0.0
+        self._enemy_dead_enemy_cake_value = 0.0
+        self._prev_enemy_tower_hp_for_push = None
+        self._prev_main_enemy_tower_dist = None
+        self._last_tower_push_eval_frame = -10000
+        self._prev_enemy_cake_dist = None
+        self._last_enemy_dead_cake_eval_frame = -10000
         self.init_max_exp_of_each_hero()
 
     def init_max_exp_of_each_hero(self):
@@ -106,6 +147,27 @@ class GameRewardManager:
         self.frame_data_process(frame_data)
         self.get_reward(frame_data, self.m_reward_value)
         return self.m_reward_value
+
+    def record_action_context(self, frame_data, action):
+        """Record pre-step action context used by delayed reward detectors."""
+        self.last_luban_skill1_action_context = None
+        if not isinstance(action, (list, tuple)) or len(action) < 6:
+            return
+        if int(action[0]) != 4:
+            return
+        main_hero = self._find_main_hero(frame_data)
+        if not self._is_luban(main_hero):
+            return
+        target_index = int(action[5])
+        target_entity = self._target_entity(frame_data, main_hero, target_index)
+        target_pos = self._entity_pos(target_entity)
+        if target_pos is None:
+            return
+        self.last_luban_skill1_action_context = {
+            "target_index": target_index,
+            "target_runtime": self._actor_runtime(target_entity),
+            "aim_pos": target_pos,
+        }
 
     def set_cur_calc_frame_vec(self, calc_frame_map, frame_data, camp):
         main_hero, enemy_hero = self._find_heroes_by_camp(frame_data, camp)
@@ -143,15 +205,13 @@ class GameRewardManager:
             elif reward_name == "cleanse_success":
                 if calc_frame_map is self.m_main_calc_frame_map:
                     reward_struct.cur_frame_value = float(
-                        self._cleanse_main_count - self._cleanse_enemy_count
+                        self._cleanse_main_count - self._cleanse_enemy_count - self._skill2_misuse_count
                     )
                 else:
                     reward_struct.cur_frame_value = 0.0
-            elif reward_name == "skill_hit_enemy_hero":
+            elif reward_name in SKILL_HIT_REWARD_KEYS:
                 if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(
-                        self._skill_hit_main_count - self._skill_hit_enemy_count
-                    )
+                    reward_struct.cur_frame_value = float(self._skill_hit_reward_counts.get(reward_name, 0.0))
                 else:
                     reward_struct.cur_frame_value = 0.0
             elif reward_name == "cake_pickup":
@@ -177,6 +237,23 @@ class GameRewardManager:
                         self._safe_last_hit_count = 0
                 else:
                     reward_struct.cur_frame_value = 0.0
+            elif reward_name == "berserk_timing":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._berserk_timing_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
+            elif reward_name == "minion_tower_push":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._minion_tower_push_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
+            elif reward_name == "enemy_dead_enemy_cake":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._enemy_dead_enemy_cake_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
+            elif reward_name in ("win", "no_op_streak_penalty"):
+                reward_struct.cur_frame_value = 0.0
 
     def calculate_exp_sum(self, hero):
         exp_sum = 0.0
@@ -212,14 +289,26 @@ class GameRewardManager:
             else:
                 enemy_camp = _get(hero, "camp")
                 enemy_hero = hero
-        self._cleanse_main_count, self._cleanse_enemy_count = self._compute_cleanse_events(
-            main_hero, enemy_hero
+        frame_no = frame_data.get("frame_no", frame_data.get("frameNo", 0))
+        self._cleanse_main_count, self._cleanse_enemy_count, self._skill2_misuse_count = self._compute_cleanse_events(
+            main_hero, enemy_hero, frame_no
         )
-        self._skill_hit_main_count, self._skill_hit_enemy_count = self._compute_skill_hit_events(
-            frame_data, main_hero, enemy_hero
-        )
+        self._skill_hit_reward_counts = self._compute_skill_hit_events(frame_data, main_hero, enemy_hero)
         self._cake_pickup_count = self._detect_cake_pickup(frame_data, main_hero, enemy_hero)
-        self._recover_low_hp_count = self._detect_recover_low_hp(main_hero)
+        self._recover_low_hp_count = self._detect_recover_low_hp(main_hero, frame_no)
+        self._berserk_timing_value = self._detect_berserk_timing(
+            main_hero, enemy_hero, frame_data.get("frame_no", frame_data.get("frameNo", 0))
+        )
+        main_tower, enemy_tower = self._find_towers_by_camp(frame_data, main_camp)
+        own_soldiers_in_enemy_tower = self._own_soldiers_in_enemy_tower_range(
+            frame_data, main_hero, enemy_tower
+        )
+        self._minion_tower_push_value = self._detect_minion_tower_push(
+            frame_data, main_hero, enemy_hero, enemy_tower, own_soldiers_in_enemy_tower
+        )
+        self._enemy_dead_enemy_cake_value = self._detect_enemy_dead_enemy_cake(
+            frame_data, main_hero, enemy_hero, enemy_tower, own_soldiers_in_enemy_tower
+        )
         self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
         self.set_cur_calc_frame_vec(self.m_enemy_calc_frame_map, frame_data, enemy_camp)
 
@@ -228,6 +317,7 @@ class GameRewardManager:
         frame_no = frame_data.get("frame_no", frame_data.get("frameNo", 0))
         reward_sum = 0.0
         main_hero = self._find_main_hero(frame_data)
+        main_tower, enemy_tower = self._find_main_enemy_towers(frame_data, main_hero)
 
         for reward_name, reward_struct in self.m_cur_calc_frame_map.items():
             if reward_name == "ep_rate":
@@ -251,7 +341,7 @@ class GameRewardManager:
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name == "cleanse_success":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "skill_hit_enemy_hero":
+            elif reward_name in SKILL_HIT_REWARD_KEYS:
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name == "cake_pickup":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
@@ -259,6 +349,12 @@ class GameRewardManager:
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name == "safe_last_hit":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
+            elif reward_name == "berserk_timing":
+                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
+            elif reward_name in SCENARIO_REWARD_KEYS:
+                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
+            elif reward_name in ("win", "no_op_streak_penalty"):
+                reward_struct.value = 0.0
             else:
                 reward_struct.cur_frame_value = (
                     self.m_main_calc_frame_map[reward_name].cur_frame_value
@@ -270,21 +366,59 @@ class GameRewardManager:
                 )
                 reward_struct.value = reward_struct.cur_frame_value - reward_struct.last_frame_value
 
-            time_scale = 1.0
-            if self.time_scale_arg > 0 and reward_name not in GameConfig.REWARD_WITHOUT_TIME_SCALE:
-                time_scale = math.pow(0.6, float(frame_no) / self.time_scale_arg)
+            time_scale = self._time_scale(reward_name, frame_no)
 
             if not self.has_last_frame:
                 reward_struct.value = 0.0
 
+            weight_multiplier = self._reward_weight_multiplier(
+                reward_name, frame_no, main_hero, main_tower, enemy_tower
+            )
             reward_dict[f"{reward_name}_origin"] = reward_struct.value
-            reward_dict[f"{reward_name}_weight"] = reward_struct.value * reward_struct.weight * time_scale
+            reward_dict[f"{reward_name}_weight"] = (
+                reward_struct.value * reward_struct.weight * time_scale * weight_multiplier
+            )
             reward_sum += reward_dict[f"{reward_name}_weight"]
 
         reward_dict["reward_sum"] = reward_sum
         reward_dict.update(self.m_last_hit_debug)
+        reward_dict.update(self._recover_debug)
         self.has_last_frame = True
         return reward_dict
+
+    def _reward_weight_multiplier(self, reward_name, frame_no, main_hero, main_tower, enemy_tower):
+        if reward_name != "death":
+            return 1.0
+        enemy_tower_hp_rate = _safe_div(_get(enemy_tower or {}, "hp", 0), _get(enemy_tower or {}, "max_hp", 0), 0.0)
+        if 0.0 < enemy_tower_hp_rate < GameConfig.DEATH_MULTIPLIER_ENEMY_TOWER_HP_THRESHOLD:
+            return GameConfig.DEATH_MULTIPLIER_ENEMY_TOWER_LOW_HP
+        if int(frame_no or 0) < GameConfig.CANNON_FRAME:
+            return GameConfig.DEATH_MULTIPLIER_BEFORE_CANNON
+        return GameConfig.DEATH_MULTIPLIER_AFTER_CANNON
+
+    def _find_main_enemy_towers(self, frame_data, main_hero):
+        main_tower, enemy_tower = None, None
+        if main_hero is None:
+            return main_tower, enemy_tower
+        main_camp = _get(main_hero, "camp", None)
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in TOWER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == _camp_key(main_camp):
+                main_tower = npc
+            else:
+                enemy_tower = npc
+        return main_tower, enemy_tower
+
+    def _time_scale(self, reward_name, frame_no):
+        if reward_name in GameConfig.REWARD_WITHOUT_TIME_SCALE:
+            return 1.0
+        scale_arg = getattr(GameConfig, "REWARD_TIME_SCALE_OVERRIDES", {}).get(reward_name, self.time_scale_arg)
+        if scale_arg == 0:
+            return 1.0
+        if scale_arg is None or scale_arg <= 0:
+            return 1.0
+        return math.pow(0.6, float(frame_no) / scale_arg)
 
     def _find_main_hero(self, frame_data):
         for hero in frame_data.get("hero_states", []):
@@ -310,7 +444,7 @@ class GameRewardManager:
     def _find_towers_by_camp(self, frame_data, camp):
         main_tower, enemy_tower = None, None
         for npc in frame_data.get("npc_states", []):
-            if _get(npc, "sub_type") not in TOWER_SUB_TYPES:
+            if _get_any(npc, ["sub_type", "subType"], None) not in TOWER_SUB_TYPES:
                 continue
             if _camp_key(_get(npc, "camp")) == _camp_key(camp):
                 main_tower = npc
@@ -353,6 +487,13 @@ class GameRewardManager:
             "last_hit_enemy_count": 0,
         }
 
+    def _empty_recover_debug(self):
+        return {
+            "recover_attempt_count": 0,
+            "recover_success_count": 0,
+            "recover_interrupted_count": 0,
+        }
+
     def _actor_runtime(self, actor):
         if actor is None:
             return None
@@ -392,28 +533,13 @@ class GameRewardManager:
         except (TypeError, ValueError):
             return False
 
-    def _extract_ult_buffs(self, hero):
-        # Buffs starting with "1333" cover Di Renjie's ultimate self-buff cluster.
-        if hero is None:
-            return set()
-        buff_skills = _get(_get(hero or {}, "buff_state", {}) or {}, "buff_skills", []) or []
-        result = set()
-        for buff in buff_skills:
-            bid = _get_any(buff, ["config_id", "configId", "skill_id", "skillId"], 0)
-            try:
-                bid_int = int(bid or 0)
-            except (TypeError, ValueError):
-                continue
-            if bid_int > 0 and str(bid_int).startswith("1333"):
-                result.add(bid_int)
-        return result
-
     def _used_skill2(self, hero):
         if hero is None:
             return False
-        slots = _get(_get(hero or {}, "skill_state", {}) or {}, "slot_states", []) or []
+        skill_state = _get_any(hero or {}, ["skill_state", "skillState"], {}) or {}
+        slots = _get_any(skill_state, ["slot_states", "slotStates"], []) or []
         for slot in slots:
-            slot_type = _get(slot, "slot_type", None)
+            slot_type = _get_any(slot, ["slot_type", "slotType"], None)
             if isinstance(slot_type, int):
                 slot_idx = slot_type
             else:
@@ -436,28 +562,49 @@ class GameRewardManager:
                     return False
         return False
 
-    def _compute_cleanse_events(self, main_hero, enemy_hero):
-        # Returns (main_cleansed, enemy_cleansed) for the current frame.
-        # Only triggers in 133 vs 133 matchups; otherwise tracked state is reset.
-        if not self._is_di_renjie(main_hero) or not self._is_di_renjie(enemy_hero):
-            self.prev_main_ult_buffs = set()
-            self.prev_enemy_ult_buffs = set()
-            return 0, 0
+    def _compute_cleanse_events(self, main_hero, enemy_hero, frame_no):
+        CLEANSE_WINDOW = getattr(GameConfig, "CLEANSE_WINDOW_FRAMES", 300)
 
-        main_ult_buffs = self._extract_ult_buffs(main_hero)
-        enemy_ult_buffs = self._extract_ult_buffs(enemy_hero)
+        if not self._is_di_renjie(main_hero) or not self._is_di_renjie(enemy_hero):
+            self._main_ult_hit_frame = -99999
+            self._enemy_ult_hit_frame = -99999
+            return 0, 0, 0
+
+        main_runtime = self._actor_runtime(main_hero)
+        enemy_runtime = self._actor_runtime(enemy_hero)
+
+        for hurt in _get(main_hero, "take_hurt_infos", []) or []:
+            atker = _get_any(hurt, ["atker", "attacker"], None)
+            slot = self._slot_idx(_get_any(hurt, ["skillSlot", "skill_slot"], -1))
+            if atker == enemy_runtime and slot == 3:
+                self._main_ult_hit_frame = frame_no
+                break
+
+        for hurt in _get(enemy_hero, "take_hurt_infos", []) or []:
+            atker = _get_any(hurt, ["atker", "attacker"], None)
+            slot = self._slot_idx(_get_any(hurt, ["skillSlot", "skill_slot"], -1))
+            if atker == main_runtime and slot == 3:
+                self._enemy_ult_hit_frame = frame_no
+                break
+
         main_used_skill2 = self._used_skill2(main_hero)
         enemy_used_skill2 = self._used_skill2(enemy_hero)
 
-        enemy_lost = self.prev_enemy_ult_buffs - enemy_ult_buffs
-        main_lost = self.prev_main_ult_buffs - main_ult_buffs
+        main_cleansed = 0
+        if frame_no - self._main_ult_hit_frame <= CLEANSE_WINDOW and main_used_skill2:
+            main_cleansed = 1
+            self._main_ult_hit_frame = -99999
 
-        main_cleansed = 1 if (enemy_lost and main_used_skill2) else 0
-        enemy_cleansed = 1 if (main_lost and enemy_used_skill2) else 0
+        enemy_cleansed = 0
+        if frame_no - self._enemy_ult_hit_frame <= CLEANSE_WINDOW and enemy_used_skill2:
+            enemy_cleansed = 1
+            self._enemy_ult_hit_frame = -99999
 
-        self.prev_main_ult_buffs = main_ult_buffs
-        self.prev_enemy_ult_buffs = enemy_ult_buffs
-        return main_cleansed, enemy_cleansed
+        main_skill2_misuse = 0
+        if main_used_skill2 and not self._is_in_berserk_engagement(main_hero, enemy_hero):
+            main_skill2_misuse = 1
+
+        return main_cleansed, enemy_cleansed, main_skill2_misuse
 
     def _slot_idx(self, slot_type):
         if isinstance(slot_type, int):
@@ -476,9 +623,10 @@ class GameRewardManager:
     def _slot_succ_used(self, hero, target_slot):
         if hero is None:
             return False
-        slots = _get(_get(hero or {}, "skill_state", {}) or {}, "slot_states", []) or []
+        skill_state = _get_any(hero or {}, ["skill_state", "skillState"], {}) or {}
+        slots = _get_any(skill_state, ["slot_states", "slotStates"], []) or []
         for slot in slots:
-            if self._slot_idx(_get(slot, "slot_type", None)) != target_slot:
+            if self._slot_idx(_get_any(slot, ["slot_type", "slotType"], None)) != target_slot:
                 continue
             succ = _get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0)
             try:
@@ -487,19 +635,23 @@ class GameRewardManager:
                 return False
         return False
 
-    def _count_skill_hits_on(self, victim, attacker_runtime, attacker_side):
+    def _empty_skill_hit_reward_counts(self):
+        return {key: 0.0 for key in SKILL_HIT_REWARD_KEYS}
+
+    def _count_skill_hits_on(self, victim, attacker_runtime, attacker_side, attacker_config, reward_key_map):
         # Walk victim.take_hurt_infos and count skill 1/2/3 hits attributed to attacker.
         # Slot 3 hits are capped via attacker_side's armed/credit_used state.
+        counts = self._empty_skill_hit_reward_counts()
         if victim is None or attacker_runtime is None:
-            return 0
+            return counts
         hurts = _get(victim, "take_hurt_infos", []) or []
-        count = 0
         for hurt in hurts:
             atker = _get_any(hurt, ["atker", "attacker"], None)
             if atker != attacker_runtime:
                 continue
             slot_int = self._slot_idx(_get_any(hurt, ["skillSlot", "skill_slot"], -1))
-            if slot_int not in (1, 2, 3):
+            reward_key = reward_key_map.get((attacker_config, slot_int))
+            if not reward_key:
                 continue
             try:
                 hurt_val = float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0)
@@ -509,18 +661,18 @@ class GameRewardManager:
                 continue
             if slot_int == 3:
                 if self.slot3_armed.get(attacker_side, False) and not self.slot3_credit_used.get(attacker_side, False):
-                    count += 1
+                    counts[reward_key] += 1.0
                     self.slot3_credit_used[attacker_side] = True
             else:
-                count += 1
-        return count
+                counts[reward_key] += 1.0
+        return counts
 
     def _compute_skill_hit_events(self, frame_data, main_hero, enemy_hero):
-        # Positive-only: reward our skill 1/2/3 hits on enemy hero (slot 3 capped).
-        # No penalty for being hit by enemy — hp_point already covers that, and
-        # adding a negative signal risks over-defensive play.
+        # Positive-only: reward selected skill hits. Di Renjie skill 2 is not in
+        # SKILL_HIT_* maps; it is rewarded only via cleanse_success.
         SLOT3_TIMEOUT = 200
         frame_no = frame_data.get("frame_no", frame_data.get("frameNo", 0))
+        counts = self._empty_skill_hit_reward_counts()
 
         if self.slot3_armed.get("main", False) and frame_no - self.slot3_armed_frame.get("main", -10000) > SLOT3_TIMEOUT:
             self.slot3_armed["main"] = False
@@ -529,10 +681,192 @@ class GameRewardManager:
             self.slot3_armed["main"] = True
             self.slot3_credit_used["main"] = False
             self.slot3_armed_frame["main"] = frame_no
+        if self._is_luban(main_hero) and self._slot_succ_used(main_hero, 1):
+            self.pending_luban_skill1_frame = frame_no
+            context = self.last_luban_skill1_action_context or {}
+            self.pending_luban_skill1_aim_pos = context.get("aim_pos")
+            self.pending_luban_skill1_target_runtime = context.get("target_runtime")
+            self.pending_luban_skill1_hit_soldiers = set()
+            self.last_luban_skill1_action_context = None
 
         main_runtime = self._actor_runtime(main_hero)
-        main_hits = self._count_skill_hits_on(enemy_hero, main_runtime, "main")
-        return main_hits, 0
+        main_config = int(_get_any(main_hero or {}, ["config_id", "configId", "hero_id", "heroId"], 0) or 0)
+        hero_counts = self._count_skill_hits_on(
+            enemy_hero, main_runtime, "main", main_config, SKILL_HIT_HERO_REWARD_KEYS
+        )
+        for key, value in hero_counts.items():
+            counts[key] += value
+        if hero_counts.get("direnjie_skill3_hit_enemy_hero", 0.0) > 0:
+            self.pending_direnjie_skill3_followup_frame = frame_no
+            self.pending_direnjie_skill3_followup_used = False
+
+        counts["luban_skill1_hit_enemy_soldier"] += self._detect_luban_skill1_soldier_hits(
+            frame_data, main_hero, frame_no
+        )
+        counts["direnjie_skill3_followup_damage"] += self._detect_direnjie_skill3_followup_damage(
+            enemy_hero, main_runtime, frame_no
+        )
+        return counts
+
+    def _is_luban(self, hero):
+        return int(_get_any(hero or {}, ["config_id", "configId", "hero_id", "heroId"], 0) or 0) == 112
+
+    def _is_direnjie(self, hero):
+        return int(_get_any(hero or {}, ["config_id", "configId", "hero_id", "heroId"], 0) or 0) == 133
+
+    def _enemy_soldier_hp_map(self, frame_data):
+        current = {}
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == _camp_key(self.main_hero_camp):
+                continue
+            runtime = self._actor_runtime(npc)
+            if runtime is None:
+                continue
+            current[runtime] = {
+                "hp": float(_get(npc, "hp", 0) or 0),
+                "pos": self._entity_pos(npc),
+            }
+        return current
+
+    def _detect_luban_skill1_soldier_hits(self, frame_data, main_hero, frame_no):
+        current_hp = self._enemy_soldier_hp_map(frame_data)
+        reward_count = 0.0
+        pending_frame = self.pending_luban_skill1_frame
+        if self._is_luban(main_hero) and pending_frame is not None:
+            elapsed = int(frame_no or 0) - int(pending_frame or 0)
+            if 0 <= elapsed <= GameConfig.LUBAN_SKILL1_SOLDIER_HIT_WINDOW:
+                for runtime, info in current_hp.items():
+                    if runtime in self.pending_luban_skill1_hit_soldiers:
+                        continue
+                    prev_info = self.prev_enemy_soldier_hp.get(runtime)
+                    prev_hp = prev_info.get("hp") if isinstance(prev_info, dict) else prev_info
+                    hp = info.get("hp", 0.0)
+                    if prev_hp is not None and hp < prev_hp and self._matches_luban_skill1_aim(runtime, info.get("pos")):
+                        reward_count += 1.0
+                        self.pending_luban_skill1_hit_soldiers.add(runtime)
+            elif elapsed > GameConfig.LUBAN_SKILL1_SOLDIER_HIT_WINDOW:
+                self.pending_luban_skill1_frame = None
+                self.pending_luban_skill1_aim_pos = None
+                self.pending_luban_skill1_target_runtime = None
+                self.pending_luban_skill1_hit_soldiers = set()
+        self.prev_enemy_soldier_hp = current_hp
+        return reward_count
+
+    def _matches_luban_skill1_aim(self, runtime, soldier_pos):
+        if self.pending_luban_skill1_target_runtime is not None and runtime == self.pending_luban_skill1_target_runtime:
+            return True
+        if soldier_pos is None or self.pending_luban_skill1_aim_pos is None:
+            return False
+        return math.dist(soldier_pos, self.pending_luban_skill1_aim_pos) <= GameConfig.LUBAN_SKILL1_SOLDIER_AIM_RADIUS
+
+    def _target_entity(self, frame_data, main_hero, target_index):
+        heroes = frame_data.get("hero_states", []) or []
+        enemy_hero = None
+        for hero in heroes:
+            if hero is not main_hero:
+                enemy_hero = hero
+                break
+        target_soldiers = self._target_enemy_soldiers(frame_data, main_hero)
+        target_soldiers += [None] * max(0, 4 - len(target_soldiers))
+        enemy_tower = self._enemy_tower(frame_data, main_hero)
+        monster = self._nearest_monster(frame_data, main_hero)
+        target_entities = [None, enemy_hero, main_hero] + target_soldiers[:4] + [enemy_tower, monster]
+        if 0 <= target_index < len(target_entities):
+            return target_entities[target_index]
+        return None
+
+    def _target_enemy_soldiers(self, frame_data, main_hero):
+        soldiers = []
+        main_camp = _get(main_hero or {}, "camp", None)
+        main_pos = self._project_for_target_sort(main_hero)
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == _camp_key(main_camp):
+                continue
+            soldiers.append(npc)
+        return sorted(soldiers, key=lambda unit: self._soldier_target_sort_key(unit, main_pos))[:4]
+
+    def _soldier_target_sort_key(self, soldier, main_pos):
+        pos = self._project_for_target_sort(soldier)
+        hp_ratio = _safe_div(_get(soldier, "hp", 0), _get(soldier, "max_hp", 0), 0.0)
+        lane = pos[0] if pos else 0.0
+        frontline_score = -abs(lane)
+        progress = lane
+        dist_to_self = math.dist(pos, main_pos) if pos is not None and main_pos is not None else 1e9
+        return (-frontline_score, -progress, dist_to_self, hp_ratio, self._actor_runtime(soldier) or 0)
+
+    def _project_for_target_sort(self, entity):
+        pos = self._entity_pos(entity)
+        if pos is None:
+            return None
+        x, z = pos
+        if _camp_key(self.main_hero_camp) == 2:
+            x, z = -x, -z
+        sqrt2 = math.sqrt(2.0)
+        return (x + z) / sqrt2, (x - z) / sqrt2
+
+    def _entity_pos(self, entity):
+        if entity is None:
+            return None
+        collider = _get(entity, "collider", {}) or {}
+        loc = _get(collider, "location", None) or _get(entity, "location", None)
+        if not loc:
+            return None
+        return float(_get(loc, "x", 0) or 0), float(_get(loc, "z", 0) or 0)
+
+    def _enemy_tower(self, frame_data, main_hero):
+        main_camp = _get(main_hero or {}, "camp", None)
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in TOWER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) != _camp_key(main_camp):
+                return npc
+        return None
+
+    def _nearest_monster(self, frame_data, main_hero):
+        main_pos = self._entity_pos(main_hero)
+        monsters = []
+        for npc in frame_data.get("npc_states", []) or []:
+            sub_type = _get_any(npc, ["sub_type", "subType"], None)
+            if sub_type in SOLDIER_SUB_TYPES or sub_type in TOWER_SUB_TYPES:
+                continue
+            pos = self._entity_pos(npc)
+            if pos is not None:
+                monsters.append((math.dist(pos, main_pos) if main_pos is not None else 1e9, npc))
+        return sorted(monsters, key=lambda item: item[0])[0][1] if monsters else None
+
+    def _detect_direnjie_skill3_followup_damage(self, enemy_hero, main_runtime, frame_no):
+        if self.pending_direnjie_skill3_followup_frame is None or self.pending_direnjie_skill3_followup_used:
+            return 0.0
+        elapsed = int(frame_no or 0) - int(self.pending_direnjie_skill3_followup_frame or 0)
+        if elapsed <= 0:
+            return 0.0
+        if elapsed > GameConfig.DI_RENJIE_SKILL3_FOLLOWUP_WINDOW:
+            self.pending_direnjie_skill3_followup_frame = None
+            self.pending_direnjie_skill3_followup_used = False
+            return 0.0
+        if self._enemy_hero_damaged_by_main(enemy_hero, main_runtime):
+            self.pending_direnjie_skill3_followup_used = True
+            self.pending_direnjie_skill3_followup_frame = None
+            return 1.0
+        return 0.0
+
+    def _enemy_hero_damaged_by_main(self, enemy_hero, main_runtime):
+        if enemy_hero is None or main_runtime is None:
+            return False
+        for hurt in _get(enemy_hero, "take_hurt_infos", []) or []:
+            atker = _get_any(hurt, ["atker", "attacker"], None)
+            if atker != main_runtime:
+                continue
+            try:
+                if float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
 
     def _detect_cake_pickup(self, frame_data, main_hero, enemy_hero):
         # Detect: cake disappeared this frame + main hero is the closer one to it +
@@ -554,25 +888,32 @@ class GameRewardManager:
             self.prev_main_hp = _get(main_hero, "hp", None) if main_hero else None
             return 0
 
-        main_loc = _get(main_hero, "location", {}) or {}
-        main_pos = (float(_get(main_loc, "x", 0) or 0), float(_get(main_loc, "z", 0) or 0))
+        main_pos = self._entity_pos(main_hero)
+        if main_pos is None:
+            self.prev_main_hp = _get(main_hero, "hp", None)
+            return 0
         main_hp = float(_get(main_hero, "hp", 0) or 0)
         main_max_hp = float(_get(main_hero, "max_hp", 1) or 1)
-        hp_rate = main_hp / max(main_max_hp, 1.0)
+        prev_main_hp = self.prev_main_hp if self.prev_main_hp is not None else main_hp
+        prev_hp_rate = prev_main_hp / max(main_max_hp, 1.0)
         hp_jump = main_hp - (self.prev_main_hp if self.prev_main_hp is not None else main_hp)
         self.prev_main_hp = main_hp
 
-        if hp_rate >= 1.0:
+        if prev_hp_rate >= 0.9:
             return 0
         if hp_jump < 100:
             return 0
 
-        enemy_loc = _get(enemy_hero, "location", {}) if enemy_hero else None
-        enemy_pos = None
-        if enemy_loc:
-            enemy_pos = (float(_get(enemy_loc, "x", 0) or 0), float(_get(enemy_loc, "z", 0) or 0))
+        enemy_pos = self._entity_pos(enemy_hero) if enemy_hero else None
 
-        count = 0
+        if prev_hp_rate < 0.2:
+            reward_value = 1.0
+        elif prev_hp_rate < 0.5:
+            reward_value = 0.5
+        else:
+            reward_value = 0.3
+
+        count = 0.0
         for cake_pos in disappeared:
             d_main = ((main_pos[0] - cake_pos[0]) ** 2 + (main_pos[1] - cake_pos[1]) ** 2) ** 0.5
             if d_main > 1500:
@@ -581,30 +922,278 @@ class GameRewardManager:
                 d_enemy = ((enemy_pos[0] - cake_pos[0]) ** 2 + (enemy_pos[1] - cake_pos[1]) ** 2) ** 0.5
                 if d_enemy < d_main:
                     continue
-            count += 1
+            count += reward_value
         return count
 
-    def _detect_recover_low_hp(self, main_hero):
-        # Detect: main hero used slot 4 (recover skill) this frame while hp_rate < 0.5.
-        if main_hero is None:
+    def _detect_berserk_timing(self, main_hero, enemy_hero, frame_no):
+        value = 0.0
+        used_berserk = self._used_skill_by_config(main_hero, GameConfig.BERSERK_SKILL_ID)
+        in_engagement = self._is_in_berserk_engagement(main_hero, enemy_hero)
+
+        if used_berserk:
+            if in_engagement:
+                self._pending_berserk_frame = None
+                return GameConfig.BERSERK_GOOD_REWARD
+            if self._pending_berserk_frame is None:
+                self._pending_berserk_frame = int(frame_no or 0)
+
+        if self._pending_berserk_frame is not None:
+            elapsed = int(frame_no or 0) - self._pending_berserk_frame
+            if elapsed <= GameConfig.BERSERK_LOOKAHEAD_FRAMES and in_engagement:
+                value = GameConfig.BERSERK_GOOD_REWARD
+                self._pending_berserk_frame = None
+            elif elapsed >= GameConfig.BERSERK_LOOKAHEAD_FRAMES:
+                value = GameConfig.BERSERK_WASTED_REWARD
+                self._pending_berserk_frame = None
+        return value
+
+    def _detect_minion_tower_push(self, frame_data, main_hero, enemy_hero, enemy_tower, own_soldier_count):
+        frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)
+        current_hp = float(_get(enemy_tower or {}, "hp", 0) or 0)
+        current_dist = self._distance_to_enemy_tower(main_hero, enemy_tower)
+        prev_hp = self._prev_enemy_tower_hp_for_push
+        prev_dist = self._prev_main_enemy_tower_dist
+        self._prev_enemy_tower_hp_for_push = current_hp if enemy_tower is not None else None
+        self._prev_main_enemy_tower_dist = current_dist
+
+        if frame_no - self._last_tower_push_eval_frame < GameConfig.TOWER_PUSH_EVAL_INTERVAL:
+            return 0.0
+        if not self._tower_push_context(main_hero, enemy_hero, enemy_tower, own_soldier_count):
+            return 0.0
+
+        self._last_tower_push_eval_frame = frame_no
+        if self._is_actively_pushing_tower(frame_data, main_hero, enemy_tower, current_hp, prev_hp):
+            return GameConfig.TOWER_PUSH_REWARD
+        if (
+            current_dist is not None
+            and prev_dist is not None
+            and current_dist < prev_dist - GameConfig.TOWER_PUSH_APPROACH_DELTA
+        ):
+            return GameConfig.TOWER_PUSH_APPROACH_REWARD
+        return GameConfig.TOWER_PUSH_IDLE_PENALTY
+
+    def _detect_enemy_dead_enemy_cake(self, frame_data, main_hero, enemy_hero, enemy_tower, own_soldier_count):
+        frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)
+        enemy_cake = self._enemy_cake(frame_data, enemy_tower)
+        current_dist = self._distance_to_entity(main_hero, enemy_cake)
+        prev_dist = self._prev_enemy_cake_dist
+        self._prev_enemy_cake_dist = current_dist
+
+        if frame_no - self._last_enemy_dead_cake_eval_frame < GameConfig.ENEMY_DEAD_CAKE_EVAL_INTERVAL:
+            return 0.0
+        if frame_no >= GameConfig.CANNON_FRAME:
+            return 0.0
+        if not self._is_enemy_dead(enemy_hero):
+            return 0.0
+        if own_soldier_count < GameConfig.ENEMY_DEAD_CAKE_MIN_SOLDIERS:
+            return 0.0
+        if enemy_cake is None or current_dist is None:
+            return 0.0
+        if enemy_tower is None or float(_get(enemy_tower, "hp", 0) or 0) <= 0:
+            return 0.0
+        if main_hero is None or float(_get(main_hero, "hp", 0) or 0) <= 0:
+            return 0.0
+
+        self._last_enemy_dead_cake_eval_frame = frame_no
+        if current_dist <= GameConfig.ENEMY_DEAD_CAKE_NEAR_RANGE:
+            return GameConfig.ENEMY_DEAD_CAKE_NEAR_REWARD
+        if (
+            prev_dist is not None
+            and current_dist < prev_dist - GameConfig.ENEMY_DEAD_CAKE_APPROACH_DELTA
+        ):
+            return GameConfig.ENEMY_DEAD_CAKE_APPROACH_REWARD
+        return 0.0
+
+    def _tower_push_context(self, main_hero, enemy_hero, enemy_tower, own_soldier_count):
+        if main_hero is None or enemy_tower is None:
+            return False
+        if float(_get(main_hero, "hp", 0) or 0) <= 0:
+            return False
+        if float(_get(enemy_tower, "hp", 0) or 0) <= 0:
+            return False
+        if own_soldier_count < GameConfig.TOWER_PUSH_MIN_SOLDIERS:
+            return False
+        return self._is_enemy_dead(enemy_hero) or self._is_enemy_far_from_tower(enemy_hero, enemy_tower)
+
+    def _is_actively_pushing_tower(self, frame_data, main_hero, enemy_tower, current_hp, prev_hp):
+        tower_runtime = self._actor_runtime(enemy_tower)
+        if tower_runtime is not None and _get(main_hero or {}, "attack_target", None) == tower_runtime:
+            return True
+        if prev_hp is not None and current_hp < prev_hp:
+            return True
+        main_pos = self._entity_pos(main_hero)
+        tower_pos = self._entity_pos(enemy_tower)
+        if main_pos is None or tower_pos is None:
+            return False
+        attack_range = float(
+            _get(main_hero or {}, "attack_range", GameConfig.TOWER_PUSH_HERO_ATTACK_RANGE_FALLBACK)
+            or GameConfig.TOWER_PUSH_HERO_ATTACK_RANGE_FALLBACK
+        )
+        if math.dist(main_pos, tower_pos) > attack_range:
+            return False
+        return self._tower_targets_own_soldier(frame_data, main_hero, enemy_tower)
+
+    def _own_soldiers_in_enemy_tower_range(self, frame_data, main_hero, enemy_tower):
+        if main_hero is None or enemy_tower is None:
             return 0
+        main_camp = _camp_key(_get(main_hero, "camp", None))
+        tower_pos = self._entity_pos(enemy_tower)
+        if tower_pos is None:
+            return 0
+        tower_range = self._tower_attack_range(enemy_tower)
+        count = 0
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) != main_camp:
+                continue
+            if float(_get(npc, "hp", 0) or 0) <= 0:
+                continue
+            pos = self._entity_pos(npc)
+            if pos is not None and math.dist(pos, tower_pos) <= tower_range:
+                count += 1
+        return count
+
+    def _tower_targets_own_soldier(self, frame_data, main_hero, tower):
+        target_runtime = _get(tower or {}, "attack_target", None)
+        if target_runtime is None:
+            return False
+        main_camp = _camp_key(_get(main_hero or {}, "camp", None))
+        for npc in frame_data.get("npc_states", []) or []:
+            if self._actor_runtime(npc) != target_runtime:
+                continue
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                return False
+            return _camp_key(_get(npc, "camp", None)) == main_camp
+        return False
+
+    def _enemy_cake(self, frame_data, enemy_tower):
+        cakes = frame_data.get("cakes", []) or []
+        if not cakes:
+            return None
+        tower_pos = self._entity_pos(enemy_tower)
+        if tower_pos is None:
+            return cakes[0]
+        cakes_with_dist = []
+        for cake in cakes:
+            pos = self._entity_pos(cake)
+            if pos is not None:
+                cakes_with_dist.append((math.dist(pos, tower_pos), cake))
+        return sorted(cakes_with_dist, key=lambda item: item[0])[0][1] if cakes_with_dist else None
+
+    def _distance_to_enemy_tower(self, main_hero, enemy_tower):
+        return self._distance_to_entity(main_hero, enemy_tower)
+
+    def _distance_to_entity(self, source, target):
+        source_pos = self._entity_pos(source)
+        target_pos = self._entity_pos(target)
+        if source_pos is None or target_pos is None:
+            return None
+        return math.dist(source_pos, target_pos)
+
+    def _is_enemy_dead(self, enemy_hero):
+        return enemy_hero is not None and float(_get(enemy_hero, "hp", 0) or 0) <= 0
+
+    def _is_enemy_far_from_tower(self, enemy_hero, enemy_tower):
+        dist = self._distance_to_entity(enemy_hero, enemy_tower)
+        return dist is not None and dist >= GameConfig.TOWER_PUSH_ENEMY_FAR_RANGE
+
+    def _tower_attack_range(self, tower):
+        return float(
+            _get(tower or {}, "attack_range", GameConfig.TOWER_PUSH_TOWER_RANGE_FALLBACK)
+            or GameConfig.TOWER_PUSH_TOWER_RANGE_FALLBACK
+        )
+
+    def _used_skill_by_config(self, hero, config_id):
+        if hero is None:
+            return False
+        skill_state = _get_any(hero or {}, ["skill_state", "skillState"], {}) or {}
+        slots = _get_any(skill_state, ["slot_states", "slotStates"], []) or []
+        for slot in slots:
+            slot_config = _get_any(slot, ["config_id", "configId"], 0)
+            try:
+                if int(slot_config or 0) != int(config_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            succ = _get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0)
+            try:
+                return float(succ or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    def _is_in_berserk_engagement(self, main_hero, enemy_hero):
+        if main_hero is None or enemy_hero is None:
+            return False
+        if float(_get(enemy_hero, "hp", 0) or 0) <= 0:
+            return False
+        return math.dist(_loc(main_hero), _loc(enemy_hero)) <= GameConfig.BERSERK_ENGAGE_RANGE
+
+    def _detect_recover_low_hp(self, main_hero, frame_no):
+        self._recover_debug = self._empty_recover_debug()
+        if main_hero is None:
+            self._pending_recover = None
+            return 0
+
+        frame_no = int(frame_no or 0)
         main_hp = float(_get(main_hero, "hp", 0) or 0)
         main_max_hp = float(_get(main_hero, "max_hp", 1) or 1)
         hp_rate = main_hp / max(main_max_hp, 1.0)
-        if hp_rate >= 0.5:
-            return 0
-        if self._slot_succ_used(main_hero, 4):
-            return 1
+        buff_ids = self._hero_buff_ids(main_hero)
+        has_start_buff = GameConfig.RECOVER_START_BUFF_ID in buff_ids
+        has_effect_buff = GameConfig.RECOVER_EFFECT_BUFF_ID in buff_ids
+
+        if self._pending_recover is None and hp_rate < 0.5:
+            slot4_used = self._slot_succ_used(main_hero, 4)
+            summoner_heal_used = self._used_skill_by_config(main_hero, 80102)
+            if slot4_used or summoner_heal_used or has_start_buff:
+                self._pending_recover = {
+                    "attempt_frame": frame_no,
+                    "main_hp_at_attempt": main_hp,
+                    "saw_start_buff": bool(has_start_buff),
+                    "saw_effect_buff": bool(has_effect_buff),
+                }
+                self._recover_debug["recover_attempt_count"] = 1
+
+        if self._pending_recover is not None:
+            self._pending_recover["saw_start_buff"] = bool(
+                self._pending_recover.get("saw_start_buff", False) or has_start_buff
+            )
+            self._pending_recover["saw_effect_buff"] = bool(
+                self._pending_recover.get("saw_effect_buff", False) or has_effect_buff
+            )
+            elapsed = frame_no - int(self._pending_recover["attempt_frame"])
+            if elapsed >= GameConfig.RECOVER_CONFIRM_FRAMES:
+                hp_gain = main_hp - float(self._pending_recover["main_hp_at_attempt"])
+                success = hp_gain >= GameConfig.RECOVER_HP_GAIN_THRESHOLD
+                self._pending_recover = None
+                if success:
+                    self._recover_debug["recover_success_count"] = 1
+                    return 1
+                self._recover_debug["recover_interrupted_count"] = 1
         return 0
+
+    def _hero_buff_ids(self, hero):
+        buff_state = _get_any(hero or {}, ["buff_state", "buffState"], {}) or {}
+        buff_skills = _get_any(buff_state, ["buff_skills", "buffSkills"], []) or []
+        ids = set()
+        for buff in buff_skills:
+            buff_id = _get_any(buff, ["config_id", "configId", "id"], 0)
+            try:
+                buff_id = int(buff_id or 0)
+            except (TypeError, ValueError):
+                buff_id = 0
+            if buff_id > 0:
+                ids.add(buff_id)
+        return ids
 
     def _is_under_own_tower(self, main_hero, main_tower):
         if main_hero is None or main_tower is None:
             return False
-        main_loc = _get(main_hero, "location", {}) or {}
-        tower_loc = _get(main_tower, "location", {}) or {}
-        main_x = float(_get(main_loc, "x", 0) or 0)
-        main_z = float(_get(main_loc, "z", 0) or 0)
-        tower_x = float(_get(tower_loc, "x", 0) or 0)
-        tower_z = float(_get(tower_loc, "z", 0) or 0)
-        dist = ((main_x - tower_x) ** 2 + (main_z - tower_z) ** 2) ** 0.5
+        main_pos = self._entity_pos(main_hero)
+        tower_pos = self._entity_pos(main_tower)
+        if main_pos is None or tower_pos is None:
+            return False
+        dist = ((main_pos[0] - tower_pos[0]) ** 2 + (main_pos[1] - tower_pos[1]) ** 2) ** 0.5
         return dist <= 8800

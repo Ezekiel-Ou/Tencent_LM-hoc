@@ -72,16 +72,51 @@ def build_monitor():
     config = config.end_panel()
 
     config = config.add_panel(name="rule_intervention", name_en="rule_intervention", type="line")
-    config = _add_metric(config, "rule_override_count", "0.01")
+    for metric_name in (
+        "rule_override_count",
+        "force_home_override_count",
+        "force_home_start_count",
+        "force_home_retreat_count",
+        "force_home_return_count",
+        "cleanse_override_count",
+        "luban_skill1_aim_assist_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
 
     config = config.add_panel(name="new_reward_signals", name_en="new_reward_signals", type="line")
     for metric_name in (
         "reward_cleanse_success",
-        "reward_skill_hit_enemy_hero",
         "reward_cake_pickup",
         "reward_recover_skill_low_hp",
         "reward_safe_last_hit",
+        "reward_minion_tower_push",
+        "reward_enemy_dead_enemy_cake",
+        "reward_win",
+        "reward_berserk_timing",
+        "reward_no_op_streak_penalty",
+    ):
+        config = _add_metric(config, metric_name, "0.0001")
+    config = config.end_panel()
+
+    config = config.add_panel(name="recover_debug", name_en="recover_debug", type="line")
+    for metric_name in (
+        "recover_attempt_count",
+        "recover_success_count",
+        "recover_interrupted_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="skill_hit_detail", name_en="skill_hit_detail", type="line")
+    for metric_name in (
+        "reward_luban_skill1_hit_enemy_soldier",
+        "reward_luban_skill1_hit_enemy_hero",
+        "reward_luban_skill2_hit_enemy_hero",
+        "reward_luban_skill3_hit_enemy_hero",
+        "reward_direnjie_skill1_hit_enemy_hero",
+        "reward_direnjie_skill3_hit_enemy_hero",
+        "reward_direnjie_skill3_followup_damage",
     ):
         config = _add_metric(config, metric_name, "0.0001")
     config = config.end_panel()

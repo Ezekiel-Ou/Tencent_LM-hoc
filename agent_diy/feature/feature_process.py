@@ -655,9 +655,10 @@ class FeatureProcess:
         return values
 
     def _slot_state(self, hero, slot_idx):
-        slots = _get(_get(hero or {}, "skill_state", {}) or {}, "slot_states", []) or []
+        skill_state = _get_any(hero or {}, ["skill_state", "skillState"], {}) or {}
+        slots = _get_any(skill_state, ["slot_states", "slotStates"], []) or []
         for slot in slots:
-            if self._slot_key(_get(slot, "slot_type", None)) == slot_idx:
+            if self._slot_key(_get_any(slot, ["slot_type", "slotType"], None)) == slot_idx:
                 return slot
         return None
 
@@ -687,7 +688,7 @@ class FeatureProcess:
         level = _safe_float(_get(slot or {}, "level", 0), 0.0)
         usable = bool(_get(slot or {}, "usable", False))
         cooldown = _safe_float(_get(slot or {}, "cooldown", 0), 0.0)
-        cooldown_max = _safe_float(_get(slot or {}, "cooldown_max", 0), 0.0)
+        cooldown_max = _safe_float(_get_any(slot or {}, ["cooldown_max", "cooldownMax"], 0), 0.0)
         cd_bucket = 0 if cooldown <= 0 else _bucket(cooldown, [1000, 3000, 6000, 15000]) + 1
         values.extend(
             [
@@ -700,23 +701,23 @@ class FeatureProcess:
             ]
         )
         values.extend(_one_hot(cd_bucket, 6))
-        succ = _safe_float(_get(slot or {}, "succUsedInFrame", 0), 0.0)
+        succ = _safe_float(_get_any(slot or {}, ["succUsedInFrame", "succ_used_in_frame"], 0), 0.0)
         recent_hit = self._recent_flag(side, "hit_any")
         recent_interrupted = self._recent_recover_interrupted(side)
         values.extend(
             [
                 float(succ > 0),
-                _clip(_safe_float(_get(slot or {}, "usedTimes", 0), 0.0) / 20.0, 0.0, 1.0),
-                _clip(_safe_float(_get(slot or {}, "hitHeroTimes", 0), 0.0) / 20.0, 0.0, 1.0),
+                _clip(_safe_float(_get_any(slot or {}, ["usedTimes", "used_times"], 0), 0.0) / 20.0, 0.0, 1.0),
+                _clip(_safe_float(_get_any(slot or {}, ["hitHeroTimes", "hit_hero_times"], 0), 0.0) / 20.0, 0.0, 1.0),
                 recent_hit,
                 recent_interrupted,
             ]
         )
         values.extend(
             [
-                float(_safe_int(_get(slot or {}, "nextConfigID", 0), 0) > 0),
-                float(_safe_float(_get(slot or {}, "comboEffectTime", 0), 0.0) > 0),
-                _clip(_safe_float(_get(slot or {}, "comboEffectTime", 0), 0.0) / 10000.0, 0.0, 1.0),
+                float(_safe_int(_get_any(slot or {}, ["nextConfigID", "nextConfigId", "next_config_id"], 0), 0) > 0),
+                float(_safe_float(_get_any(slot or {}, ["comboEffectTime", "combo_effect_time"], 0), 0.0) > 0),
+                _clip(_safe_float(_get_any(slot or {}, ["comboEffectTime", "combo_effect_time"], 0), 0.0) / 10000.0, 0.0, 1.0),
             ]
         )
         values.extend(self._skill_type_tags(hero_id, slot_idx, config_id))
@@ -785,7 +786,8 @@ class FeatureProcess:
         ]
 
     def _hero_buff_feature(self, hero, side):
-        buff_skills = _get(_get(hero or {}, "buff_state", {}) or {}, "buff_skills", []) or []
+        buff_state = _get_any(hero or {}, ["buff_state", "buffState"], {}) or {}
+        buff_skills = _get_any(buff_state, ["buff_skills", "buffSkills"], []) or []
         buff_ids = [self._config_id(buff) for buff in buff_skills if self._config_id(buff) > 0]
         current_set = set(buff_ids)
         last_set = self.last_buff_set.get(side, set())
@@ -881,9 +883,9 @@ class FeatureProcess:
         hero_pos = self._position(hero)
         enemy_pos = self.enemy_pos if side == "self" else self.self_pos
         base = Args.SELF_BASE_ANCHOR if side == "self" else Args.ENEMY_BASE_ANCHOR
-        recall_legal = 0.0
+        move_legal = 0.0
         if self.legal_action is not None and self.legal_action.shape[0] >= 10:
-            recall_legal = float(self.legal_action[9] > 0)
+            move_legal = float(self.legal_action[2] > 0)
         enemy_dist = self._dist(hero_pos, enemy_pos)
         recent_damage = self._recent_flag(side, "hurt_any")
         lane_sign = 0.0
@@ -894,7 +896,7 @@ class FeatureProcess:
             float(hp <= 0.15),
             float(enemy_dist <= Args.TOWER_ATTACK_RANGE_FALLBACK),
             recent_damage,
-            recall_legal,
+            move_legal,
             self._dist_ratio(hero_pos, base),
             lane_sign,
             float(hp <= 0.30 and enemy_dist > Args.TOWER_ATTACK_RANGE_FALLBACK and recent_damage == 0.0),
@@ -1102,7 +1104,7 @@ class FeatureProcess:
         source_entity = source.get("entity")
         source_config = self._config_id(source_entity)
         values.extend([float(source_config == 112), float(source_config == 133)])
-        slot_type = self._slot_key(_get(bullet, "slot_type", -1))
+        slot_type = self._slot_key(_get_any(bullet, ["slot_type", "slotType"], -1))
         values.extend(_one_hot(slot_type if 0 <= slot_type <= 3 else 4, 5))
         skill_id = _safe_int(_get(bullet, "skill_id", 0), 0)
         values.append(float(skill_id != 0))
@@ -1346,7 +1348,7 @@ class FeatureProcess:
                 info = self.runtime_index.get(target, {})
                 kind = info.get("kind", "unknown")
                 event_kind = {"hero": "hit_hero", "soldier": "hit_soldier", "tower": "hit_tower"}.get(kind, "hit_any")
-                self.recent_hit_events.append({"frame": self.frame_no, "side": side, "kind": event_kind, "slot": self._slot_key(_get(hit, "slot_type", -1))})
+                self.recent_hit_events.append({"frame": self.frame_no, "side": side, "kind": event_kind, "slot": self._slot_key(_get_any(hit, ["slot_type", "slotType"], -1))})
                 self.recent_hit_events.append({"frame": self.frame_no, "side": side, "kind": "hit_any"})
             for hurt in _get(hero, "take_hurt_infos", []) or []:
                 attacker = _get(hurt, "atker", None)
@@ -1358,7 +1360,7 @@ class FeatureProcess:
                         "frame": self.frame_no,
                         "side": side,
                         "kind": event_kind,
-                        "slot": self._slot_key(_get(hurt, "skillSlot", -1)),
+                        "slot": self._slot_key(_get_any(hurt, ["skillSlot", "skill_slot"], -1)),
                         "hurt": _safe_float(_get(hurt, "hurtValue", 0), 0.0),
                     }
                 )
@@ -1430,9 +1432,11 @@ class FeatureProcess:
         for side, hero in (("self", self.self_hero), ("enemy", self.enemy_hero)):
             self.last_money[side] = self._money_total(hero)
             self.last_hp[side] = self._hp_ratio(hero)
+            buff_state = _get_any(hero or {}, ["buff_state", "buffState"], {}) or {}
+            buff_skills = _get_any(buff_state, ["buff_skills", "buffSkills"], []) or []
             self.last_buff_set[side] = set(
                 self._config_id(buff)
-                for buff in (_get(_get(hero or {}, "buff_state", {}) or {}, "buff_skills", []) or [])
+                for buff in buff_skills
                 if self._config_id(buff) > 0
             )
         self.last_tower_hp["self"] = self._hp_ratio(self.self_tower)
@@ -1450,7 +1454,7 @@ class FeatureProcess:
                 "frame_no": self.frame_no,
                 "source_actor": _get(bullet, "source_actor", None),
                 "camp": _get(bullet, "camp", None),
-                "slot_type": _get(bullet, "slot_type", None),
+                "slot_type": _get_any(bullet, ["slot_type", "slotType"], None),
             }
         old_keys = [key for key, value in self.bullet_cache.items() if self.frame_no - value["frame_no"] > 8]
         for key in old_keys:
