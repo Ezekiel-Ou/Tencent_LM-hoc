@@ -20,7 +20,6 @@ from agent_diy.feature.definition import (
 )
 from agent_diy.workflow.env_conf_manager import EnvConfManager
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
-from tools.metrics_utils import get_training_metrics
 from tools.model_pool_utils import get_valid_model_pool
 
 
@@ -90,6 +89,7 @@ class EpisodeRunner:
         self.episode_cnt = 0
         self.last_report_monitor_time = 0
         self.selected_summoner_skills = [None for _ in range(self.agent_num)]
+        self.no_op_streaks = [0 for _ in range(self.agent_num)]
 
     def _call_init_config(self, usr_conf, is_eval=False):
         blue_hero_ids, red_hero_ids = EnvConfManager.extract_hero_ids_from_usr_conf(usr_conf)
@@ -115,19 +115,9 @@ class EpisodeRunner:
             select_skills = agent.init_config(config_data)
             EnvConfManager.inject_select_skills(usr_conf, camp_key, select_skills)
             self.selected_summoner_skills[agent_idx] = self._first_selected_skill(select_skills, my_hero_ids)
-            self.logger.info(f"Agent[{agent_idx}] init_config: camp={camp_key}, select_skills={select_skills}")
 
     def run_episodes(self):
         while True:
-            training_metrics = get_training_metrics()
-            if training_metrics:
-                for key, value in training_metrics.items():
-                    if key == "env":
-                        for env_key, env_value in value.items():
-                            self.logger.info(f"training_metrics {key} {env_key} is {env_value}")
-                    else:
-                        self.logger.info(f"training_metrics {key} is {value}")
-
             lineup = next(self.lineup_iterator)
             if sorted(lineup) and any(hero_id not in GameConfig.HERO_IDS for hero_id in lineup):
                 raise ValueError(f"unsupported lineup {lineup}; expected heroes {GameConfig.HERO_IDS}")
@@ -138,8 +128,6 @@ class EpisodeRunner:
             if handle_disaster_recovery(env_obs, self.logger):
                 break
 
-            self._debug_observation(env_obs, prefix="_reset")
-
             observation = env_obs["observation"]
             self.reset_agents(observation)
             frame_collector = FrameCollector(self.agent_num)
@@ -147,7 +135,6 @@ class EpisodeRunner:
             self.episode_cnt += 1
             reward_sum_list = [0] * self.agent_num
             is_train_test = os.environ.get("is_train_test", "False").lower() == "true"
-            self.logger.info(f"Episode {self.episode_cnt} start, usr_conf is {usr_conf}")
 
             reward_item_sum_list = [
                 {reward_name: 0.0 for reward_name in GameConfig.REWARD_WEIGHT_DICT}
@@ -161,6 +148,7 @@ class EpisodeRunner:
                 {debug_name: 0.0 for debug_name in GameConfig.ACTION_DEBUG_KEY_LIST}
                 for _ in range(self.agent_num)
             ]
+            self.no_op_streaks = [0 for _ in range(self.agent_num)]
             for i, (do_sample, agent) in enumerate(zip(self.do_samples, self.agents)):
                 if do_sample:
                     reward = agent.reward_manager.result(observation[str(i)]["frame_state"])
@@ -179,6 +167,8 @@ class EpisodeRunner:
                     if do_predict:
                         raw_action = agent.predict(observation[str(index)]) if not is_eval else agent.exploit(observation[str(index)])
                         actions[index] = _normalize_env_action(raw_action)
+                        if do_sample and getattr(agent, "reward_manager", None) is not None:
+                            agent.reward_manager.record_action_context(observation[str(index)]["frame_state"], actions[index])
                         self._accumulate_action_debug_items(action_debug_sum_list[index], actions[index])
 
                         if not is_eval and do_sample:
@@ -191,8 +181,6 @@ class EpisodeRunner:
                     break
 
                 frame_no = env_obs["frame_no"]
-                if frame_no % 100 == 0:
-                    self._debug_observation(env_obs, prefix=f"_step_f{frame_no}")
                 observation = env_obs["observation"]
                 terminated = env_obs["terminated"]
                 truncated = env_obs["truncated"]
@@ -200,6 +188,7 @@ class EpisodeRunner:
                 for i, (do_sample, agent) in enumerate(zip(self.do_samples, self.agents)):
                     if do_sample:
                         reward = agent.reward_manager.result(observation[str(i)]["frame_state"])
+                        self._apply_no_op_streak_reward(reward, actions[i], i)
                         observation[str(i)]["reward"] = reward
                         reward_sum_list[i] += reward["reward_sum"]
                         self._accumulate_reward_items(reward_item_sum_list[i], reward)
@@ -208,16 +197,18 @@ class EpisodeRunner:
 
                 is_gameover = terminated or truncated or (is_train_test and frame_no >= 1000)
                 if is_gameover:
-                    self.logger.info(
-                        f"episode_{self.episode_cnt} terminated in fno_{frame_no}, truncated:{truncated}, "
-                        f"eval:{is_eval}, reward_sum:{reward_sum_list[monitor_side]}"
-                    )
                     for i, (do_sample, agent) in enumerate(zip(self.do_samples, self.agents)):
                         if not is_eval and do_sample:
+                            terminal_value = self._apply_terminal_reward(observation[str(i)], reward_item_sum_list[i])
+                            reward_sum_list[i] += terminal_value
                             frame_collector.save_last_frame(
                                 agent_id=i,
                                 reward=observation[str(i)]["reward"]["reward_sum"],
                             )
+                    self.logger.info(
+                        f"episode_{self.episode_cnt} terminated in fno_{frame_no}, truncated:{truncated}, "
+                        f"eval:{is_eval}, reward_sum:{reward_sum_list[monitor_side]}"
+                    )
 
                     now = time.time()
                     if now - self.last_report_monitor_time >= 60:
@@ -236,6 +227,37 @@ class EpisodeRunner:
                                 monitor_data[f"selected_summoner_{skill_id}"] = 1.0 if selected_skill == skill_id else 0.0
                             monitor_data["rule_override_count"] = float(
                                 getattr(self.agents[monitor_side], "rule_override_count", 0)
+                            )
+                            monitor_data["force_home_trigger_count"] = float(
+                                getattr(self.agents[monitor_side], "force_home_trigger_count", 0)
+                            )
+                            monitor_data["force_home_override_count"] = float(
+                                getattr(self.agents[monitor_side], "force_home_override_count", 0)
+                            )
+                            monitor_data["force_home_start_count"] = float(
+                                getattr(self.agents[monitor_side], "force_home_start_count", 0)
+                            )
+                            monitor_data["force_home_retreat_count"] = float(
+                                getattr(self.agents[monitor_side], "force_home_retreat_count", 0)
+                            )
+                            monitor_data["force_home_return_count"] = float(
+                                getattr(self.agents[monitor_side], "force_home_return_count", 0)
+                            )
+                            monitor_data["cleanse_override_count"] = float(
+                                getattr(self.agents[monitor_side], "cleanse_override_count", 0)
+                            )
+                            skill2_total = float(getattr(self.agents[monitor_side], "skill2_total_cast_count", 0))
+                            cleanse_override = float(getattr(self.agents[monitor_side], "cleanse_override_count", 0))
+                            monitor_data["skill2_blocked_count"] = float(
+                                getattr(self.agents[monitor_side], "skill2_blocked_count", 0)
+                            )
+                            monitor_data["skill2_total_cast_count"] = skill2_total
+                            monitor_data["skill2_cast_outside_window_count"] = float(
+                                getattr(self.agents[monitor_side], "skill2_cast_outside_window_count", 0)
+                            )
+                            monitor_data["skill2_cleanse_rate"] = cleanse_override / max(1.0, skill2_total)
+                            monitor_data["luban_skill1_aim_assist_count"] = float(
+                                getattr(self.agents[monitor_side], "luban_skill1_aim_assist_count", 0)
                             )
                             self.monitor.put_data({os.getpid(): monitor_data})
                             self.last_report_monitor_time = now
@@ -273,137 +295,48 @@ class EpisodeRunner:
                     self.do_samples[i] = False
             agent.reset(observation[str(i)])
 
-    def _debug_observation(self, env_obs, prefix=""):
-        if os.environ.get("OBS_DEBUG", "False").lower() != "true":
-            return
-        try:
-            obs = env_obs.get("observation", {})
-            if not obs:
-                self.logger.info(f"[OBS_DEBUG]{prefix} observation is empty")
-                return
-
-            for agent_id in ["0", "1"]:
-                agent_obs = obs.get(agent_id)
-                if not agent_obs:
-                    continue
-
-                frame_state = agent_obs.get("frame_state", {})
-                frame_no = frame_state.get("frame_no", frame_state.get("frameNo", 0))
-
-                heroes = frame_state.get("hero_states", [])
-                npcs = frame_state.get("npc_states", [])
-                bullets = frame_state.get("bullets", [])
-                cakes = frame_state.get("cakes", [])
-
-                hero_info_list = []
-                for h in heroes:
-                    loc = h.get("location", {})
-                    hero_info_list.append({
-                        "config_id": h.get("config_id", 0),
-                        "runtime_id": h.get("runtime_id", 0),
-                        "camp": h.get("camp", 0),
-                        "hp": h.get("hp", 0),
-                        "max_hp": h.get("max_hp", 0),
-                        "ep": h.get("ep", 0),
-                        "max_ep": h.get("max_ep", 0),
-                        "x": loc.get("x", 0),
-                        "z": loc.get("z", 0),
-                        "level": h.get("level", 0),
-                        "attack_range": h.get("attack_range", 0),
-                        "sight_area": h.get("sight_area", 0),
-                        "mov_spd": h.get("mov_spd", 0),
-                        "atk_spd": h.get("atk_spd", 0),
-                        "money": h.get("money", 0),
-                        "money_cnt": h.get("money_cnt", 0),
-                        "kill_cnt": h.get("kill_cnt", 0),
-                        "dead_cnt": h.get("dead_cnt", 0),
-                        "behav_mode": h.get("behav_mode", ""),
-                        "is_in_grass": h.get("is_in_grass", False),
-                    })
-
-                npc_info_list = []
-                for n in npcs:
-                    loc = n.get("location", {})
-                    npc_info_list.append({
-                        "config_id": n.get("config_id", 0),
-                        "runtime_id": n.get("runtime_id", 0),
-                        "actor_type": n.get("actor_type", 0),
-                        "camp": n.get("camp", 0),
-                        "sub_type": n.get("sub_type", 0),
-                        "behav_mode": n.get("behav_mode", 0),
-                        "hp": n.get("hp", 0),
-                        "max_hp": n.get("max_hp", 0),
-                        "x": loc.get("x", 0),
-                        "z": loc.get("z", 0),
-                        "attack_range": n.get("attack_range", 0),
-                        "attack_target": n.get("attack_target", 0),
-                        "sight_area": n.get("sight_area", 0),
-                        "mov_spd": n.get("mov_spd", 0),
-                        "atk_spd": n.get("atk_spd", 0),
-                        "phy_atk": n.get("phy_atk", 0),
-                        "phy_def": n.get("phy_def", 0),
-                    })
-
-                bullet_count = len(bullets)
-                cake_count = len(cakes)
-
-                max_coord = 0
-                if heroes:
-                    for h in heroes:
-                        loc = h.get("location", {})
-                        max_coord = max(max_coord, abs(loc.get("x", 0)), abs(loc.get("z", 0)))
-
-                hero_dist = 0
-                if len(heroes) >= 2:
-                    h0_loc = heroes[0].get("location", {})
-                    h1_loc = heroes[1].get("location", {})
-                    dx = h0_loc.get("x", 0) - h1_loc.get("x", 0)
-                    dz = h0_loc.get("z", 0) - h1_loc.get("z", 0)
-                    hero_dist = (dx*dx + dz*dz) ** 0.5
-
-                self.logger.info(
-                    f"[OBS_DEBUG]{prefix} agent={agent_id} frame={frame_no} "
-                    f"heroes={len(heroes)} npcs={len(npcs)} bullets={bullet_count} cakes={cake_count} "
-                    f"max_coord={max_coord:.0f} hero_dist={hero_dist:.0f}"
-                )
-
-                for idx, h_info in enumerate(hero_info_list):
-                    self.logger.info(
-                        f"[OBS_DEBUG_HERO]{prefix} agent={agent_id} idx={idx} "
-                        f"config_id={h_info['config_id']} camp={h_info['camp']} "
-                        f"pos=({h_info['x']:.0f},{h_info['z']:.0f}) "
-                        f"hp={h_info['hp']}/{h_info['max_hp']} "
-                        f"ep={h_info['ep']}/{h_info['max_ep']} "
-                        f"lvl={h_info['level']} "
-                        f"atk_range={h_info['attack_range']} "
-                        f"sight={h_info['sight_area']} "
-                        f"mov_spd={h_info['mov_spd']} "
-                        f"atk_spd={h_info['atk_spd']} "
-                        f"money={h_info['money']}({h_info['money_cnt']}) "
-                        f"k/d={h_info['kill_cnt']}/{h_info['dead_cnt']} "
-                        f"behav={h_info['behav_mode']} grass={h_info['is_in_grass']}"
-                    )
-
-                for idx, n_info in enumerate(npc_info_list[:12]):
-                    self.logger.info(
-                        f"[OBS_DEBUG_NPC]{prefix} agent={agent_id} idx={idx} "
-                        f"config_id={n_info['config_id']} camp={n_info['camp']} "
-                        f"actor_type={n_info['actor_type']} sub_type={n_info['sub_type']} "
-                        f"pos=({n_info['x']:.0f},{n_info['z']:.0f}) "
-                        f"hp={n_info['hp']}/{n_info['max_hp']} "
-                        f"atk_range={n_info['attack_range']} sight={n_info['sight_area']} "
-                        f"atk_target={n_info['attack_target']} "
-                        f"mov_spd={n_info['mov_spd']} atk_spd={n_info['atk_spd']} "
-                        f"phy_atk={n_info['phy_atk']} phy_def={n_info['phy_def']} "
-                        f"behav={n_info['behav_mode']}"
-                    )
-
-        except Exception as e:
-            self.logger.warning(f"[OBS_DEBUG]{prefix} error: {e}")
-
     def _accumulate_reward_items(self, target, reward):
         for reward_name in GameConfig.REWARD_WEIGHT_DICT:
             target[reward_name] += float(reward.get(f"{reward_name}_weight", 0.0))
+
+    def _apply_no_op_streak_reward(self, reward, action, agent_idx):
+        button = int(action[0]) if isinstance(action, list) and action else 0
+        if button in (0, 1):
+            self.no_op_streaks[agent_idx] += 1
+        else:
+            self.no_op_streaks[agent_idx] = 0
+        if self.no_op_streaks[agent_idx] < GameConfig.NO_OP_STREAK_THRESHOLD:
+            return
+        value = float(GameConfig.NO_OP_STREAK_REWARD)
+        reward["no_op_streak_penalty_origin"] = value
+        reward["no_op_streak_penalty_weight"] = value
+        reward["reward_sum"] += value
+
+    def _apply_terminal_reward(self, observation, reward_item_sum):
+        reward = observation.get("reward", {})
+        terminal_value = self._terminal_reward_value(observation)
+        if terminal_value == 0.0:
+            return 0.0
+        reward["win_origin"] = terminal_value
+        reward["win_weight"] = terminal_value
+        reward["reward_sum"] = float(reward.get("reward_sum", 0.0)) + terminal_value
+        reward_item_sum["win"] += terminal_value
+        return terminal_value
+
+    def _terminal_reward_value(self, observation):
+        win = observation.get("win", None)
+        if win is None:
+            win = (observation.get("frame_state", {}) or {}).get("win", None)
+        if win is None:
+            return 0.0
+        if isinstance(win, str):
+            lowered = win.lower()
+            if lowered in ("true", "win", "1"):
+                return float(GameConfig.TERMINAL_WIN_REWARD)
+            if lowered in ("false", "lose", "loss", "0"):
+                return -float(GameConfig.TERMINAL_WIN_REWARD)
+            return 0.0
+        return float(GameConfig.TERMINAL_WIN_REWARD) if bool(win) else -float(GameConfig.TERMINAL_WIN_REWARD)
 
     def _accumulate_reward_debug_items(self, target, reward):
         for debug_name in GameConfig.REWARD_DEBUG_KEY_LIST:
@@ -456,12 +389,13 @@ class EpisodeRunner:
         main_hero = self._find_agent_hero(frame_state, agent)
         if not main_hero:
             return
-        slot_states = self._get(self._get(main_hero, "skill_state", {}) or {}, "slot_states", []) or []
+        skill_state = self._get(main_hero, ["skill_state", "skillState"], {}) or {}
+        slot_states = self._get(skill_state, ["slot_states", "slotStates"], []) or []
         for slot in slot_states:
             used_times = float(self._get(slot, "succUsedInFrame", self._get(slot, "succ_used_in_frame", 0)) or 0)
             if used_times <= 0:
                 continue
-            slot_key = self._slot_type_key(self._get(slot, "slot_type", None))
+            slot_key = self._slot_type_key(self._get(slot, ["slot_type", "slotType"], None))
             config_id = int(self._get(slot, "configId", self._get(slot, "config_id", 0)) or 0)
             if slot_key == "SLOT_SKILL_1":
                 target["skill_1_used_count"] += used_times

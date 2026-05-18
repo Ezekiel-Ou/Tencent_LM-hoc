@@ -48,7 +48,7 @@ class EnvConfManager:
         monitor_conf = self.usr_conf.get("monitor", {})
 
         raw_eval_interval = int(episode_conf.get("eval_interval", 0))
-        self.eval_interval = raw_eval_interval + 1 if raw_eval_interval > 0 else 0
+        self.eval_interval = raw_eval_interval if raw_eval_interval > 0 else 0
         self.default_opponent_agent = episode_conf.get("opponent_agent", "selfplay")
         self.train_opponent_types = list(episode_conf.get("opponent_agent_types", []))
         self.train_opponent_weights = list(episode_conf.get("opponent_agent_weights", []))
@@ -56,7 +56,7 @@ class EnvConfManager:
         self.monitor_side = int(monitor_conf.get("monitor_side", 0))
 
         if self.eval_interval > 0:
-            self.random_eval_start = random.randint(0, self.eval_interval)
+            self.random_eval_start = random.randint(0, self.eval_interval - 1)
 
     def get_current_config(self):
         return self.usr_conf
@@ -84,11 +84,6 @@ class EnvConfManager:
         self.usr_conf["episode"]["opponent_agent"] = opponent_agent
         self.episode_cnt += 1
 
-        self._log_info(
-            f"env_config episode={self.episode_cnt} eval={is_eval} "
-            f"monitor_side={self.monitor_side} opponent_agent={opponent_agent} "
-            f"lineup={self._current_lineup()}"
-        )
         return self.get_current_config(), is_eval, self.get_monitor_side()
 
     def _update_lineup(self, lineup):
@@ -170,10 +165,6 @@ class EnvConfManager:
             if skill_id is not None:
                 camp_conf["select_skill"] = int(skill_id)
                 camp_conf["summoner_skill_id"] = int(skill_id)
-
-    def _log_info(self, message):
-        if self.logger:
-            self.logger.info(message)
 
     def snapshot(self):
         return copy.deepcopy(self.usr_conf)

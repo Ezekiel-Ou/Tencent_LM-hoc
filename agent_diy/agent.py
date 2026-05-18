@@ -44,7 +44,7 @@ except ModuleNotFoundError:
     attached = _identity_wrapper
 
 from agent_diy.algorithm.algorithm import Algorithm
-from agent_diy.conf.conf import Config, GameConfig
+from agent_diy.conf.conf import Args, Config, GameConfig
 from agent_diy.feature.definition import NONE_ACTION, ActData, ObsData
 from agent_diy.feature.feature_process import FeatureProcess
 from agent_diy.feature.reward_process import GameRewardManager
@@ -103,12 +103,38 @@ class Agent(BaseAgent):
         self.monitor = monitor
         self.algorithm = Algorithm(self.model, self.optimizer, self.scheduler, self.device, self.logger, self.monitor)
 
-        # Force-recall rule state (used by _maybe_force_recall).
+        # Force-home rule state (used by _maybe_force_home).
         self.own_cake_exists = False
+        self.own_cake_seen_once = False
         self.last_own_cake_disappear_frame = -10000
+        self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
+        self.force_home_camp = None
+        self.force_home_phase = None
+        self.force_home_path_camp = None
+        self.force_home_path_points = []
+        self.force_home_path_ready = False
+        self.force_home_path_index = None
+        self.force_home_progress_phase = None
+        self.force_home_progress_index = None
+        self.force_home_progress_best_dist = None
+        self.force_home_stuck_frames = 0
+        self.rule_override_active = False
         self.recall_override_active = False
+        self.cleanse_override_active = False
         self.rule_override_count = 0
+        self.force_home_trigger_count = 0
+        self.force_home_override_count = 0
+        self.force_home_start_count = 0
+        self.force_home_retreat_count = 0
+        self.force_home_return_count = 0
+        self.luban_skill1_aim_assist_count = 0
+        self.cleanse_override_count = 0
+        self.skill2_blocked_count = 0
+        self.skill2_total_cast_count = 0
+        self.skill2_cast_outside_window_count = 0
+        self._enemy_ult_cast_frame = None
+        self._pending_cleanse_frame = None
 
         super().__init__(agent_type, device, logger, monitor)
 
@@ -163,12 +189,38 @@ class Agent(BaseAgent):
         self.lstm_cell = np.zeros([self.lstm_unit_size], dtype=np.float32)
         self.reward_manager = GameRewardManager(self.player_id)
         self.feature_processes = FeatureProcess(self.hero_camp, logger=self.logger)
-        # Reset force-recall rule state per episode.
+        # Reset force-home rule state per episode.
         self.own_cake_exists = False
+        self.own_cake_seen_once = False
         self.last_own_cake_disappear_frame = -10000
+        self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
+        self.force_home_camp = None
+        self.force_home_phase = None
+        self.force_home_path_camp = None
+        self.force_home_path_points = []
+        self.force_home_path_ready = False
+        self.force_home_path_index = None
+        self.force_home_progress_phase = None
+        self.force_home_progress_index = None
+        self.force_home_progress_best_dist = None
+        self.force_home_stuck_frames = 0
+        self.rule_override_active = False
         self.recall_override_active = False
+        self.cleanse_override_active = False
         self.rule_override_count = 0
+        self.force_home_trigger_count = 0
+        self.force_home_override_count = 0
+        self.force_home_start_count = 0
+        self.force_home_retreat_count = 0
+        self.force_home_return_count = 0
+        self.luban_skill1_aim_assist_count = 0
+        self.cleanse_override_count = 0
+        self.skill2_blocked_count = 0
+        self.skill2_total_cast_count = 0
+        self.skill2_cast_outside_window_count = 0
+        self._enemy_ult_cast_frame = None
+        self._pending_cleanse_frame = None
 
     def _model_inference(self, list_obs_data):
         feature = [obs_data.feature for obs_data in list_obs_data]
@@ -216,19 +268,31 @@ class Agent(BaseAgent):
 
     @predict_wrapper
     def predict(self, observation):
-        obs_data = self.observation_process(observation)
+        self._reset_rule_override_flags()
+        policy_observation = self._prepare_policy_observation(observation)
+        obs_data = self.observation_process(policy_observation)
         act_data = self._model_inference([obs_data])[0]
+        self._maybe_aim_luban_skill1(observation, act_data, is_stochastic=True)
         self.update_status(obs_data, act_data)
         action = self.action_process(observation, act_data, True)
-        return self._maybe_force_recall(observation, action)
+        action = self._maybe_auto_cleanse(observation, action)
+        action = self._maybe_force_home(observation, action)
+        self._track_skill2_action_stats(observation, action)
+        return action
 
     @exploit_wrapper
     def exploit(self, observation):
-        obs_data = self.observation_process(observation)
+        self._reset_rule_override_flags()
+        policy_observation = self._prepare_policy_observation(observation)
+        obs_data = self.observation_process(policy_observation)
         act_data = self._model_inference([obs_data])[0]
+        self._maybe_aim_luban_skill1(observation, act_data, is_stochastic=False)
         self.update_status(obs_data, act_data)
         action = self.action_process(observation, act_data, False)
-        return self._maybe_force_recall(observation, action)
+        action = self._maybe_auto_cleanse(observation, action)
+        action = self._maybe_force_home(observation, action)
+        self._track_skill2_action_stats(observation, action)
+        return action
 
     def observation_process(self, observation):
         if self.feature_processes is None:
@@ -253,82 +317,815 @@ class Agent(BaseAgent):
         action = act_data.action if is_stochastic else act_data.d_action
         return self._normalize_action(action)
 
-    def _maybe_force_recall(self, observation, action):
-        # Force button=9 (recall) when conditions match. Sets recall_override_active
-        # so build_frame can mark these frames is_train=False (skip from PPO update).
+    def _maybe_aim_luban_skill1(self, observation, act_data, is_stochastic):
+        if not getattr(GameConfig, "LUBAN_SKILL1_AIM_ASSIST", False):
+            return
+        attr = "action" if is_stochastic else "d_action"
+        action = self._normalize_action(getattr(act_data, attr, None))
+        # Only correct the sub-actions after the policy has already selected
+        # Luban skill 1. The rule does not force skill usage.
+        if len(action) != 6 or action[0] != 4:
+            return
+
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if self._hero_config_id(main_hero) != 112 or enemy_hero is None:
+            return
+        if self._distance_between_heroes(main_hero, enemy_hero) > GameConfig.LUBAN_SKILL1_AIM_RANGE:
+            return
+
+        center = int(GameConfig.LUBAN_SKILL1_AIM_CENTER)
+        target = int(GameConfig.LUBAN_SKILL1_AIM_TARGET)
+        if not self._is_luban_skill1_aim_legal(observation, center, target):
+            return
+
+        action[3] = center
+        action[4] = center
+        action[5] = target
+        setattr(act_data, attr, action)
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        self.luban_skill1_aim_assist_count += 1
+
+    def _is_luban_skill1_aim_legal(self, observation, center, target):
+        legal_action = observation.get("legal_action", [])
+        if legal_action is None:
+            legal_action = []
+        if hasattr(legal_action, "tolist"):
+            legal_action = legal_action.tolist()
+        if len(legal_action) not in (Config.LEGAL_ACTION_DIM, Config.RAW_LEGAL_ACTION_DIM):
+            return False
+        offsets = [0]
+        for size in Config.LABEL_SIZE_LIST[:-1]:
+            offsets.append(offsets[-1] + size)
+        button = 4
+        if int(legal_action[button] or 0) != 1:
+            return False
+        skill_x_offset = offsets[3]
+        skill_z_offset = offsets[4]
+        if not (0 <= center < Config.LABEL_SIZE_LIST[3]):
+            return False
+        if int(legal_action[skill_x_offset + center] or 0) != 1:
+            return False
+        if int(legal_action[skill_z_offset + center] or 0) != 1:
+            return False
+        target_offset = offsets[5]
+        if len(legal_action) == Config.RAW_LEGAL_ACTION_DIM:
+            target_offset += button * Config.LABEL_SIZE_LIST[-1]
+        return 0 <= target < Config.LABEL_SIZE_LIST[-1] and int(legal_action[target_offset + target] or 0) == 1
+
+    def _hero_config_id(self, hero):
+        if not hero:
+            return 0
+        return int(hero.get("config_id", hero.get("configId", 0)) or 0)
+
+    def _hero_location(self, hero):
+        if not hero:
+            return None
+        collider = hero.get("collider", {}) or {}
+        loc = collider.get("location", None) or hero.get("location", None)
+        if not loc:
+            return None
+        return float(loc.get("x", 0) or 0), float(loc.get("z", 0) or 0)
+
+    def _distance_between_heroes(self, hero_a, hero_b):
+        loc_a = self._hero_location(hero_a)
+        loc_b = self._hero_location(hero_b)
+        if loc_a is None or loc_b is None:
+            return float("inf")
+        dx = loc_a[0] - loc_b[0]
+        dz = loc_a[1] - loc_b[1]
+        return (dx * dx + dz * dz) ** 0.5
+
+    def _dist(self, a, b, default=1e9):
+        if a is None or b is None:
+            return default
+        dx = float(a[0]) - float(b[0])
+        dz = float(a[1]) - float(b[1])
+        return (dx * dx + dz * dz) ** 0.5
+
+    def _maybe_auto_cleanse(self, observation, action):
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None or enemy_hero is None:
+            self._pending_cleanse_frame = None
+            return action
+
+        if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
+            self._pending_cleanse_frame = None
+            return action
+
+        frame_no = self._frame_no(frame_state)
+        pending_cleanse_frame = self._pending_cleanse_frame
+        if pending_cleanse_frame is not None and frame_no >= int(pending_cleanse_frame):
+            self._pending_cleanse_frame = None
+            if self._is_skill2_available(main_hero):
+                cleanse_action = self._legalized_rule_action(observation, [5, 15, 15, 15, 15, 2])
+                if cleanse_action is not None:
+                    self.rule_override_active = True
+                    self.cleanse_override_active = True
+                    self.rule_override_count += 1
+                    self.cleanse_override_count += 1
+                    return cleanse_action
+
+        if not self._was_hit_by_enemy_ult(main_hero, enemy_hero):
+            return action
+
+        if self._pending_cleanse_frame is None:
+            self._pending_cleanse_frame = frame_no + 1
+        return action
+
+    def _prepare_policy_observation(self, observation):
+        self._track_enemy_ult_cast(observation)
+        delay_observation = self._maybe_delay_cleanse_hit_frame(observation)
+        if delay_observation is not observation:
+            return delay_observation
+        return self._maybe_block_skill2(observation)
+
+    def _maybe_delay_cleanse_hit_frame(self, observation):
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None or enemy_hero is None:
+            return observation
+        if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
+            return observation
+        if not self._was_hit_by_enemy_ult(main_hero, enemy_hero):
+            return observation
+
+        frame_no = self._frame_no(frame_state)
+        if self._pending_cleanse_frame is None or frame_no >= int(self._pending_cleanse_frame):
+            self._pending_cleanse_frame = frame_no + 1
+        return self._mask_skill2_button(observation)
+
+    def _mask_skill2_button(self, observation):
+        legal_action = observation.get("legal_action", [])
+        if legal_action is None:
+            return observation
+        legal_len = len(legal_action)
+        if legal_len not in (Config.LEGAL_ACTION_DIM, Config.RAW_LEGAL_ACTION_DIM):
+            return observation
+        if int(legal_action[5] or 0) == 0:
+            return observation
+
+        if hasattr(legal_action, "copy"):
+            masked_legal_action = legal_action.copy()
+        else:
+            masked_legal_action = list(legal_action)
+        masked_legal_action[5] = 0
+
+        masked_observation = dict(observation)
+        masked_observation["legal_action"] = masked_legal_action
+        return masked_observation
+
+    def _was_hit_by_enemy_ult(self, main_hero, enemy_hero):
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        for hurt in main_hero.get("take_hurt_infos", []) or []:
+            atker = hurt.get("atker") or hurt.get("attacker")
+            slot = self._slot_idx(hurt.get("skillSlot")) if "skillSlot" in hurt else self._slot_idx(hurt.get("skill_slot"))
+            if atker == enemy_runtime and slot == 3:
+                return True
+        return False
+
+    def _track_enemy_ult_cast(self, observation):
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None or enemy_hero is None:
+            return
+        if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
+            return
+        if self._slot_succ_used(enemy_hero, 3):
+            frame_no = self._frame_no(frame_state)
+            self._enemy_ult_cast_frame = frame_no
+
+    def _maybe_block_skill2(self, observation):
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if not self._should_block_skill2(frame_state, main_hero, enemy_hero):
+            return observation
+
+        legal_action = observation.get("legal_action", [])
+        if legal_action is None:
+            return observation
+        legal_len = len(legal_action)
+        if legal_len not in (Config.LEGAL_ACTION_DIM, Config.RAW_LEGAL_ACTION_DIM):
+            return observation
+        if int(legal_action[5] or 0) == 0:
+            return observation
+
+        if hasattr(legal_action, "copy"):
+            masked_legal_action = legal_action.copy()
+        else:
+            masked_legal_action = list(legal_action)
+        masked_legal_action[5] = 0
+
+        masked_observation = dict(observation)
+        masked_observation["legal_action"] = masked_legal_action
+        self.skill2_blocked_count += 1
+        return masked_observation
+
+    def _should_block_skill2(self, frame_state, main_hero, enemy_hero):
+        if main_hero is None or enemy_hero is None:
+            return False
+        if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
+            return False
+        enemy_hp = self._unit_hp(enemy_hero)
+        if enemy_hp <= 0:
+            return False
+        enemy_level = int(self._get_any(enemy_hero, ["level"], 0) or 0)
+        if enemy_level < 4:
+            return False
+        last_cast = self._enemy_ult_cast_frame
+        frame_no = self._frame_no(frame_state)
+        return last_cast is None or frame_no - int(last_cast) > GameConfig.CLEANSE_WINDOW_FRAMES
+
+    def _track_skill2_action_stats(self, observation, action):
+        action = self._normalize_action(action)
+        if len(action) != 6 or int(action[0]) != 5:
+            return
+        self.skill2_total_cast_count += 1
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if self._should_block_skill2(frame_state, main_hero, enemy_hero):
+            self.skill2_cast_outside_window_count += 1
+
+    def _actor_runtime(self, actor):
+        if actor is None:
+            return None
+        actor_state = actor.get("actor_state") or actor.get("actorState")
+        if actor_state is not None:
+            runtime_id = actor_state.get("runtime_id") or actor_state.get("runtimeId")
+            if runtime_id is not None:
+                return runtime_id
+        return actor.get("runtime_id") or actor.get("runtimeId")
+
+    def _is_skill2_available(self, main_hero):
+        slots = self._slot_states(main_hero)
+        for slot in slots:
+            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != 2:
+                continue
+            usable = bool(slot.get("usable", False))
+            cooldown = float(slot.get("cooldown", 0) or 0)
+            return usable and cooldown <= 0
+        return False
+
+    def _slot_succ_used(self, hero, target_slot):
+        for slot in self._slot_states(hero):
+            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != target_slot:
+                continue
+            try:
+                return float(self._get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0) or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    def _frame_no(self, frame_state):
+        return int(frame_state.get("frame_no", frame_state.get("frameNo", 0)) or 0)
+
+    def _slot_states(self, hero):
+        skill_state = self._get_any(hero or {}, ["skill_state", "skillState"], {}) or {}
+        return self._get_any(skill_state, ["slot_states", "slotStates"], []) or []
+
+    def _get_any(self, obj, keys, default=None):
+        for key in keys:
+            if isinstance(obj, dict):
+                value = obj.get(key, None)
+            else:
+                value = getattr(obj, key, None)
+            if value is not None:
+                return value
+        return default
+
+    def _reset_rule_override_flags(self):
+        self.rule_override_active = False
+        self.recall_override_active = False
+        self.cleanse_override_active = False
+
+    def _legalized_rule_action(self, observation, preferred_action, active_heads=None):
+        legal_action = observation.get("legal_action", [])
+        if legal_action is None:
+            legal_action = []
+        if hasattr(legal_action, "tolist"):
+            legal_action = legal_action.tolist()
+        if len(legal_action) not in (Config.LEGAL_ACTION_DIM, Config.RAW_LEGAL_ACTION_DIM):
+            return None
+
+        preferred_action = self._normalize_action(preferred_action)
+        button = preferred_action[0]
+        if not (0 <= button < Config.LABEL_SIZE_LIST[0]):
+            return None
+        if int(legal_action[button] or 0) != 1:
+            return None
+
+        offsets = [0]
+        for size in Config.LABEL_SIZE_LIST[:-1]:
+            offsets.append(offsets[-1] + size)
+
+        action = list(preferred_action)
+        active_heads = set(range(1, len(Config.LABEL_SIZE_LIST))) if active_heads is None else set(active_heads)
+        for head_idx in range(1, len(Config.LABEL_SIZE_LIST)):
+            if head_idx not in active_heads:
+                continue
+            if head_idx == len(Config.LABEL_SIZE_LIST) - 1 and len(legal_action) == Config.RAW_LEGAL_ACTION_DIM:
+                size = Config.LABEL_SIZE_LIST[-1]
+                target_base = offsets[-1]
+                mask = legal_action[target_base + button * size : target_base + (button + 1) * size]
+            else:
+                size = Config.LABEL_SIZE_LIST[head_idx]
+                mask = legal_action[offsets[head_idx] : offsets[head_idx] + size]
+            action[head_idx] = self._preferred_or_first_legal(
+                action[head_idx],
+                mask,
+                prefer_nearest=head_idx in (1, 2, 3, 4),
+            )
+            if action[head_idx] is None:
+                return None
+        return [int(value) for value in action]
+
+    def _preferred_or_first_legal(self, preferred_idx, mask, prefer_nearest=False):
+        if hasattr(mask, "tolist"):
+            mask = mask.tolist()
+        legal_indices = [idx for idx, value in enumerate(mask) if int(value or 0) == 1]
+        if not legal_indices:
+            return None
+        if 0 <= int(preferred_idx) < len(mask) and int(mask[int(preferred_idx)] or 0) == 1:
+            return int(preferred_idx)
+        if prefer_nearest:
+            preferred_idx = int(preferred_idx)
+            return min(legal_indices, key=lambda idx: (abs(idx - preferred_idx), idx))
+        return int(legal_indices[0])
+
+    def _maybe_force_home(self, observation, action):
+        # Force walking back to base when low HP and safe, then return to the
+        # first-tower area after healing. The task has no usable recall button.
         self.recall_override_active = False
 
         frame_state = observation.get("frame_state", {}) or {}
         frame_no = frame_state.get("frame_no", frame_state.get("frameNo", 0)) or 0
-
-        # Condition 1: pre-cannon era (frame < 6254, the canonical cannon marker).
-        if frame_no >= 6254:
+        current_camp = self._resolve_current_camp(observation, frame_state)
+        if current_camp not in (1, 2):
+            self._clear_force_home_phase(clear_camp=True)
             return action
+        if self.force_home_path_camp not in (None, current_camp):
+            self._reset_force_home_path()
+        self.force_home_path_camp = current_camp
+        self.force_home_camp = current_camp
 
         main_hero, enemy_hero, main_tower = self._find_my_hero_and_tower(frame_state)
         if main_hero is None:
+            self._clear_force_home_phase(clear_camp=True)
             return action
 
-        # Death detection: reset state and skip override on death.
-        dead_cnt = int(main_hero.get("dead_cnt", 0) or 0)
+        hp = self._unit_hp(main_hero)
+        hp_rate = self._unit_hp_rate(main_hero)
+        if hp <= 0:
+            self._clear_force_home_phase(clear_camp=True)
+            return action
+
+        dead_cnt = int(self._get_any(main_hero, ["dead_cnt", "deadCnt"], 0) or 0)
         if dead_cnt > self.prev_dead_cnt:
             self.prev_dead_cnt = dead_cnt
+            self._clear_force_home_phase(clear_camp=True)
             return action
         self.prev_dead_cnt = dead_cnt
 
-        # Condition 2: self hp_rate < 0.20.
-        max_hp = float(main_hero.get("max_hp", 1) or 1)
-        hp = float(main_hero.get("hp", 0) or 0)
-        if hp / max(max_hp, 1.0) >= 0.20:
-            return action
+        if self.force_home_phase is None:
+            self._record_force_home_path(main_hero, frame_no)
 
-        # Condition 3: own tower hp_rate > 0.50.
-        if main_tower is not None:
-            t_hp = float(main_tower.get("hp", 0) or 0)
-            t_max = float(main_tower.get("max_hp", 1) or 1)
-            if t_hp / max(t_max, 1.0) <= 0.50:
+        if self.force_home_phase == "retreat_spring" and hp_rate >= GameConfig.FORCE_HOME_HP_RECOVERED:
+            self.force_home_phase = "return"
+            self.force_home_path_index = None
+            self._reset_force_home_progress()
+        if self.force_home_phase == "return" and hp_rate <= GameConfig.FORCE_HOME_HP_TRIGGER:
+            self.force_home_phase = "retreat_spring"
+            self.force_home_path_index = None
+            self._reset_force_home_progress()
+
+        if self.force_home_phase == "retreat_spring":
+            target = self._force_home_retreat_target(main_hero)
+            if target is None:
+                self._clear_force_home_phase(clear_camp=True)
                 return action
+            return self._force_walk_to(
+                observation,
+                main_hero,
+                target,
+                action,
+                phase="retreat",
+            )
 
-        # Condition 4: no enemy hero within 10000 (continuous check).
-        if enemy_hero is not None:
-            main_loc = main_hero.get("location", {}) or {}
-            enemy_loc = enemy_hero.get("location", {}) or {}
-            dx = float(main_loc.get("x", 0) or 0) - float(enemy_loc.get("x", 0) or 0)
-            dz = float(main_loc.get("z", 0) or 0) - float(enemy_loc.get("z", 0) or 0)
-            if (dx * dx + dz * dz) ** 0.5 < 10000:
+        if self.force_home_phase == "return":
+            target = self._force_home_return_target(main_hero)
+            if target is None:
+                self._clear_force_home_phase(clear_camp=True)
                 return action
+            if self._own_perspective_lane(main_hero) >= GameConfig.FORCE_HOME_RETURN_EXIT_LANE:
+                self._clear_force_home_phase(clear_camp=True)
+                return action
+            return self._force_walk_to(
+                observation,
+                main_hero,
+                target,
+                action,
+                phase="return",
+            )
 
-        # Condition 5: recall (button 9) legal this frame.
-        legal_action = observation.get("legal_action", []) or []
-        if len(legal_action) <= 9 or int(legal_action[9] or 0) != 1:
+        if not self._should_start_force_home(frame_state, frame_no, hp_rate, enemy_hero, main_tower):
             return action
 
-        # Condition 6: own cake unavailable AND not respawning within 5s.
-        self._update_own_cake_state(frame_state, frame_no)
-        if self.own_cake_exists:
-            return action
-        # Cake respawn cycle = 75s * 30fps = 2250 frames. "Within 5s" = 150 frames before respawn.
-        respawn_frame = self.last_own_cake_disappear_frame + 2250
-        if respawn_frame - frame_no <= 150 and respawn_frame > frame_no:
+        if not self._has_force_home_path():
             return action
 
-        # Condition 7: recover skill (slot 4) unavailable.
-        if self._is_recover_skill_available(main_hero):
+        self.force_home_trigger_count += 1
+        self.force_home_phase = "retreat_spring"
+        current_idx = self._nearest_force_home_path_index(self._project_own_perspective(main_hero))
+        self.force_home_path_index = max(0, current_idx - 1) if current_idx is not None else 0
+        target = self._force_home_retreat_target(main_hero)
+        if target is None:
+            self._clear_force_home_phase(clear_camp=True)
             return action
+        return self._force_walk_to(
+            observation,
+            main_hero,
+            target,
+            action,
+            phase="retreat",
+            count_start=True,
+        )
 
-        # All conditions met: override action to recall.
-        self.recall_override_active = True
+    def _should_start_force_home(self, frame_state, frame_no, hp_rate, enemy_hero, main_tower):
+        if not self._is_own_cake_unavailable_for_force_home(frame_state, frame_no):
+            return False
+        main_hero, _, _ = self._find_my_hero_and_tower(frame_state)
+        if not self._enemy_invisible_or_far(main_hero, enemy_hero):
+            return False
+        if int(frame_no or 0) < GameConfig.CANNON_FRAME:
+            return hp_rate < GameConfig.FORCE_HOME_HP_TRIGGER_PRE_CANNON
+        if hp_rate >= GameConfig.FORCE_HOME_HP_TRIGGER:
+            return False
+        if main_tower is None:
+            return False
+        if not self._tower_hp_above(main_tower, GameConfig.FORCE_HOME_TOWER_HP_MIN):
+            return False
+        return True
+
+    def _tower_hp_above(self, tower, threshold):
+        return self._unit_hp_rate(tower) > float(threshold)
+
+    def _clear_force_home_phase(self, clear_camp=False):
+        self.force_home_phase = None
+        self.force_home_path_index = None
+        self._reset_force_home_progress()
+        if clear_camp:
+            self.force_home_camp = None
+
+    def _reset_force_home_path(self):
+        self.force_home_path_camp = None
+        self.force_home_path_points = []
+        self.force_home_path_ready = False
+        self.force_home_path_index = None
+        self._reset_force_home_progress()
+
+    def _reset_force_home_progress(self):
+        self.force_home_progress_phase = None
+        self.force_home_progress_index = None
+        self.force_home_progress_best_dist = None
+        self.force_home_stuck_frames = 0
+
+    def _record_force_home_path(self, main_hero, frame_no):
+        if self.force_home_phase is not None or self.force_home_path_ready:
+            return
+        try:
+            frame_no = int(frame_no or 0)
+        except (TypeError, ValueError):
+            frame_no = 0
+        if frame_no > GameConfig.FORCE_HOME_PATH_RECORD_FRAMES:
+            self.force_home_path_ready = self._is_force_home_path_valid()
+            return
+
+        pos = self._project_own_perspective(main_hero)
+        if pos is None:
+            return
+        points = list(self.force_home_path_points)
+        crossed_return_lane = bool(points) and points[-1][0] < GameConfig.FORCE_HOME_RETURN_EXIT_LANE <= pos[0]
+        turn_point = self._is_force_home_turn_point(points, pos)
+        if (
+            not points
+            or crossed_return_lane
+            or turn_point
+            or self._dist(pos, points[-1]) >= GameConfig.FORCE_HOME_PATH_MIN_DISTANCE
+        ):
+            points.append((float(pos[0]), float(pos[1])))
+            self.force_home_path_points = self._compress_force_home_path(points)
+        if pos[0] >= GameConfig.FORCE_HOME_RETURN_EXIT_LANE:
+            self.force_home_path_ready = self._is_force_home_path_valid()
+
+    def _compress_force_home_path(self, points):
+        max_points = int(GameConfig.FORCE_HOME_PATH_MAX_POINTS)
+        if len(points) <= max_points:
+            return points
+        if max_points <= 2:
+            return [points[0], points[-1]]
+        keep = {0, len(points) - 1}
+        ranked = sorted(
+            range(1, len(points) - 1),
+            key=lambda idx: self._force_home_path_point_importance(points, idx),
+            reverse=True,
+        )
+        keep.update(ranked[: max_points - len(keep)])
+        return [points[idx] for idx in sorted(keep)]
+
+    def _force_home_path_point_importance(self, points, idx):
+        prev_point = points[idx - 1]
+        point = points[idx]
+        next_point = points[idx + 1]
+        prev_dist = self._dist(prev_point, point)
+        next_dist = self._dist(point, next_point)
+        turn_score = 0.0
+        denom = prev_dist * next_dist
+        if denom > 1e-6:
+            v1 = (point[0] - prev_point[0], point[1] - prev_point[1])
+            v2 = (next_point[0] - point[0], next_point[1] - point[1])
+            cos_value = (v1[0] * v2[0] + v1[1] * v2[1]) / denom
+            turn_score = max(0.0, 1.0 - cos_value) * 5000.0
+        lane_score = 0.0
+        exit_lane = GameConfig.FORCE_HOME_RETURN_EXIT_LANE
+        if prev_point[0] < exit_lane <= point[0] or abs(point[0] - exit_lane) <= GameConfig.FORCE_HOME_PATH_MIN_DISTANCE:
+            lane_score = 100000.0
+        return lane_score + turn_score + min(prev_dist, next_dist)
+
+    def _is_force_home_turn_point(self, points, pos):
+        if len(points) < 2:
+            return False
+        prev_point = points[-2]
+        point = points[-1]
+        prev_dist = self._dist(prev_point, point)
+        next_dist = self._dist(point, pos)
+        if (
+            prev_dist < GameConfig.FORCE_HOME_PATH_TURN_MIN_DISTANCE
+            or next_dist < GameConfig.FORCE_HOME_PATH_TURN_MIN_DISTANCE
+        ):
+            return False
+        v1 = (point[0] - prev_point[0], point[1] - prev_point[1])
+        v2 = (pos[0] - point[0], pos[1] - point[1])
+        cos_value = (v1[0] * v2[0] + v1[1] * v2[1]) / max(prev_dist * next_dist, 1e-6)
+        return cos_value <= GameConfig.FORCE_HOME_PATH_TURN_COS
+
+    def _is_force_home_path_valid(self):
+        points = self.force_home_path_points
+        if len(points) < int(GameConfig.FORCE_HOME_PATH_MIN_POINTS):
+            return False
+        first_lane = float(points[0][0])
+        last_lane = float(points[-1][0])
+        if first_lane > -30000.0:
+            return False
+        if last_lane < GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE:
+            return False
+        return last_lane - first_lane >= 12000.0
+
+    def _has_force_home_path(self):
+        if not self.force_home_path_ready:
+            self.force_home_path_ready = self._is_force_home_path_valid()
+        return bool(self.force_home_path_ready)
+
+    def _nearest_force_home_path_index(self, pos):
+        if pos is None or not self.force_home_path_points:
+            return None
+        return min(range(len(self.force_home_path_points)), key=lambda idx: self._dist(pos, self.force_home_path_points[idx]))
+
+    def _force_home_retreat_target(self, main_hero):
+        if not self._has_force_home_path():
+            return None
+        pos = self._project_own_perspective(main_hero)
+        if self.force_home_path_index is None:
+            current_idx = self._nearest_force_home_path_index(pos)
+            self.force_home_path_index = max(0, current_idx - 1) if current_idx is not None else 0
+        self._advance_force_home_path_index(pos, -1)
+        return self._force_home_path_target(self.force_home_path_index)
+
+    def _force_home_path_target(self, index):
+        if not self.force_home_path_points:
+            return None
+        index = max(0, min(int(index), len(self.force_home_path_points) - 1))
+        return self._unproject_own_perspective(self.force_home_path_points[index])
+
+    def _force_walk_to(self, observation, main_hero, target, fallback_action, phase=None, count_start=False):
+        move_action = self._move_action_towards(main_hero, target)
+        if move_action is None:
+            return fallback_action
+        legal_move = self._legalized_rule_action(observation, move_action, active_heads=(1, 2))
+        if legal_move is None:
+            return fallback_action
+        self.rule_override_active = True
         self.rule_override_count += 1
-        # button=9 (recall), default direction slots, target=none.
-        return [9, 15, 15, 15, 15, 0]
+        self.force_home_override_count += 1
+        if count_start:
+            self.force_home_start_count += 1
+        if phase == "retreat":
+            self.force_home_retreat_count += 1
+        elif phase == "return":
+            self.force_home_return_count += 1
+        return legal_move
+
+    def _move_action_towards(self, main_hero, target):
+        loc = self._own_raw_location(main_hero)
+        target_loc = self._own_raw_location(target)
+        if loc is None or target_loc is None:
+            return None
+        dx = target_loc[0] - loc[0]
+        dz = target_loc[1] - loc[1]
+        return [
+            2,
+            self._direction_bucket(dx),
+            self._direction_bucket(dz),
+            8,
+            8,
+            0,
+        ]
+
+    def _direction_bucket(self, delta):
+        deadzone = float(GameConfig.FORCE_HOME_DIRECTION_DEADZONE)
+        if delta > deadzone:
+            return 15
+        if delta < -deadzone:
+            return 0
+        return 8
+
+    def _unit_hp(self, unit):
+        return float(self._get_any(unit or {}, ["hp", "HP"], 0) or 0)
+
+    def _unit_hp_rate(self, unit):
+        hp = self._unit_hp(unit)
+        max_hp = float(self._get_any(unit or {}, ["max_hp", "maxHp", "maxHP"], 1) or 1)
+        return hp / max(max_hp, 1.0)
+
+    def _own_perspective_lane(self, unit):
+        pos = self._project_own_perspective(unit)
+        if pos is None:
+            return float("-inf")
+        return float(pos[0])
+
+    def _enemy_invisible_or_far(self, main_hero, enemy_hero):
+        if enemy_hero is None:
+            return True
+        if not self._visible_to_own_camp(enemy_hero):
+            return True
+        main_loc = self._project_own_perspective(main_hero)
+        enemy_loc = self._project_own_perspective(enemy_hero)
+        if main_loc is None or enemy_loc is None:
+            return True
+        dx = main_loc[0] - enemy_loc[0]
+        dz = main_loc[1] - enemy_loc[1]
+        return (dx * dx + dz * dz) ** 0.5 > GameConfig.FORCE_HOME_ENEMY_SAFE_RANGE
+
+    def _visible_to_own_camp(self, unit):
+        visible = self._get_any(unit or {}, ["camp_visible", "campVisible"], None)
+        if visible is None:
+            return True
+        camp_key = self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp)
+        idx = 0 if camp_key == 1 else 1 if camp_key == 2 else None
+        if idx is None or idx >= len(visible):
+            return True
+        return bool(visible[idx])
+
+    def _resolve_current_camp(self, observation, frame_state):
+        obs_camp = self._camp_key(observation.get("player_camp", observation.get("camp", None)))
+        hero_camp = self._camp_key(self._observed_player_hero_camp(observation, frame_state))
+        if obs_camp in (1, 2) and hero_camp in (1, 2) and obs_camp != hero_camp:
+            return None
+        if obs_camp in (1, 2):
+            self.hero_camp = obs_camp
+            return obs_camp
+        if hero_camp in (1, 2):
+            self.hero_camp = hero_camp
+            return hero_camp
+        fallback = self._camp_key(self.hero_camp)
+        return fallback if fallback in (1, 2) else None
+
+    def _observed_player_hero_camp(self, observation, frame_state):
+        player_id = observation.get("player_id", getattr(self, "player_id", None))
+        if player_id is not None:
+            for hero in frame_state.get("hero_states", []) or []:
+                if self._actor_runtime(hero) == player_id:
+                    return hero.get("camp")
+        return None
+
+    def _force_home_return_target(self, main_hero=None):
+        if self._has_force_home_path() and main_hero is not None:
+            pos = self._project_own_perspective(main_hero)
+            if self.force_home_path_index is None:
+                current_idx = self._nearest_force_home_path_index(pos)
+                self.force_home_path_index = current_idx if current_idx is not None else 0
+            self._advance_force_home_path_index(pos, 1)
+            return self._force_home_path_target(self.force_home_path_index)
+        return None
+
+    def _advance_force_home_path_index(self, pos, direction):
+        if pos is None or not self.force_home_path_points or self.force_home_path_index is None:
+            return
+        direction = -1 if direction < 0 else 1
+        last_idx = len(self.force_home_path_points) - 1
+        radius = GameConfig.FORCE_HOME_PATH_WAYPOINT_RADIUS
+        while 0 <= self.force_home_path_index + direction <= last_idx:
+            target = self.force_home_path_points[self.force_home_path_index]
+            if self._dist(pos, target) > radius:
+                break
+            self.force_home_path_index += direction
+            self._reset_force_home_progress()
+        self._skip_stuck_force_home_waypoint(pos, direction)
+
+    def _skip_stuck_force_home_waypoint(self, pos, direction):
+        if pos is None or not self.force_home_path_points or self.force_home_path_index is None:
+            return
+        next_idx = self.force_home_path_index + direction
+        if next_idx < 0 or next_idx >= len(self.force_home_path_points):
+            return
+        dist = self._dist(pos, self.force_home_path_points[self.force_home_path_index])
+        phase = self.force_home_phase
+        if phase != self.force_home_progress_phase or self.force_home_path_index != self.force_home_progress_index:
+            self.force_home_progress_phase = phase
+            self.force_home_progress_index = self.force_home_path_index
+            self.force_home_progress_best_dist = dist
+            self.force_home_stuck_frames = 0
+            return
+        best_dist = self.force_home_progress_best_dist
+        if best_dist is None or dist <= best_dist - GameConfig.FORCE_HOME_STUCK_MIN_PROGRESS:
+            self.force_home_progress_best_dist = dist
+            self.force_home_stuck_frames = 0
+            return
+        self.force_home_stuck_frames += 1
+        if self.force_home_stuck_frames >= int(GameConfig.FORCE_HOME_STUCK_FRAMES):
+            self.force_home_path_index = next_idx
+            self._reset_force_home_progress()
+
+    def _own_raw_location(self, obj_or_loc):
+        if obj_or_loc is None:
+            return None
+        if isinstance(obj_or_loc, dict):
+            loc = obj_or_loc
+            if "x" not in loc:
+                loc = (obj_or_loc.get("collider", {}) or {}).get("location", None) or obj_or_loc.get("location", None)
+            if not loc:
+                return None
+            x = loc.get("x", None)
+            z = loc.get("z", None)
+        else:
+            if len(obj_or_loc) < 2:
+                return None
+            x, z = obj_or_loc[0], obj_or_loc[1]
+        if x is None or z is None:
+            return None
+        x = float(x)
+        z = float(z)
+        if abs(x) > Args.RAW_COORD_ABS_LIMIT or abs(z) > Args.RAW_COORD_ABS_LIMIT:
+            return None
+        if self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp) == 2:
+            x, z = -x, -z
+        return x, z
+
+    def _project_own_perspective(self, obj_or_loc):
+        loc = obj_or_loc
+        if obj_or_loc is not None and not isinstance(obj_or_loc, dict):
+            return None
+        if isinstance(obj_or_loc, dict) and "x" not in obj_or_loc:
+            loc = (obj_or_loc.get("collider", {}) or {}).get("location", None) or obj_or_loc.get("location", None)
+        if not loc:
+            return None
+        x = loc.get("x", None)
+        z = loc.get("z", None)
+        if x is None or z is None:
+            return None
+        x = float(x)
+        z = float(z)
+        if abs(x) > Args.RAW_COORD_ABS_LIMIT or abs(z) > Args.RAW_COORD_ABS_LIMIT:
+            return None
+        if self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp) == 2:
+            x, z = -x, -z
+        lane = (x + z) / Args.SQRT2
+        width = (x - z) / Args.SQRT2
+        return lane, width
+
+    def _unproject_own_perspective(self, projected):
+        lane, width = float(projected[0]), float(projected[1])
+        x = (lane + width) / Args.SQRT2
+        z = (lane - width) / Args.SQRT2
+        if self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp) == 2:
+            x, z = -x, -z
+        return x, z
+
+    def _camp_key(self, camp):
+        if camp in (1, "1", "PLAYERCAMP_1", "blue_camp"):
+            return 1
+        if camp in (2, "2", "PLAYERCAMP_2", "red_camp"):
+            return 2
+        return camp
 
     def _find_my_hero_and_tower(self, frame_state):
         main_hero = None
         enemy_hero = None
-        main_tower = None
-        main_camp_str = str(self.hero_camp)
+        main_towers = []
+        main_camp = self._camp_key(self.hero_camp)
         for hero in frame_state.get("hero_states", []) or []:
-            if str(hero.get("camp")) == main_camp_str:
+            if self._camp_key(hero.get("camp")) == main_camp:
                 main_hero = hero
             else:
                 enemy_hero = hero
@@ -336,31 +1133,42 @@ class Agent(BaseAgent):
             sub_type = npc.get("sub_type", None)
             if sub_type not in (21, "21", "ACTOR_SUB_TOWER"):
                 continue
-            if str(npc.get("camp")) == main_camp_str:
-                main_tower = npc
-                break
+            if self._camp_key(npc.get("camp")) == main_camp:
+                main_towers.append(npc)
+        main_tower = self._select_nearest_projected_anchor(main_towers, Args.SELF_TOWER_ANCHOR)
         return main_hero, enemy_hero, main_tower
+
+    def _select_nearest_projected_anchor(self, units, anchor):
+        if not units:
+            return None
+        return sorted(units, key=lambda unit: self._dist(self._project_own_perspective(unit), anchor))[0]
 
     def _update_own_cake_state(self, frame_state, frame_no):
         cakes = frame_state.get("cakes", []) or []
-        # Own side is x<0 for camp 1 (blue at -40000), x>0 for camp 2 (red at +40000).
-        own_x_sign = -1 if str(self.hero_camp) in ("1", "PLAYERCAMP_1", "blue_camp") else 1
         found_own = False
         for cake in cakes:
-            collider = cake.get("collider", {}) or {}
-            loc = collider.get("location", {}) or cake.get("location", {}) or {}
-            x = float(loc.get("x", 0) or 0)
-            if own_x_sign * x > 0:
+            pos = self._project_own_perspective(cake)
+            if pos is None:
+                continue
+            if self._dist(pos, Args.SELF_CAKE_ANCHOR) <= self._dist(pos, Args.ENEMY_CAKE_ANCHOR):
                 found_own = True
                 break
+        if found_own:
+            self.own_cake_seen_once = True
+            self.next_own_cake_frame = None
         if self.own_cake_exists and not found_own:
             self.last_own_cake_disappear_frame = frame_no
+            self.next_own_cake_frame = frame_no + 2250
         self.own_cake_exists = found_own
 
+    def _is_own_cake_unavailable_for_force_home(self, frame_state, frame_no):
+        self._update_own_cake_state(frame_state, frame_no)
+        return not self.own_cake_exists
+
     def _is_recover_skill_available(self, main_hero):
-        slots = (main_hero.get("skill_state", {}) or {}).get("slot_states", []) or []
+        slots = self._slot_states(main_hero)
         for slot in slots:
-            if self._slot_idx(slot.get("slot_type", None)) != 4:
+            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != 4:
                 continue
             usable = bool(slot.get("usable", False))
             cooldown = float(slot.get("cooldown", 0) or 0)
@@ -403,7 +1211,7 @@ class Agent(BaseAgent):
             raise FileNotFoundError(f"model file {model_file_path} not found")
 
         if self.cur_model_name == model_file_path:
-            self._log_info(f"current model is {model_file_path}, so skip load model")
+            return
         else:
             state_dict = self._load_checkpoint_state_dict(model_file_path)
             self.model.load_state_dict(state_dict)
@@ -413,7 +1221,6 @@ class Agent(BaseAgent):
     @load_opponent_agent_wrapper
     def load_opponent_agent(self, id="1"):
         # The official framework wrapper resolves and loads model-pool opponents.
-        self._log_info(f"load_opponent_agent delegated to framework, id={id}")
         pass
 
     def _model_file_path(self, path, id, create_dir=False):
