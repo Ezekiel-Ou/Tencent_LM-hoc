@@ -342,9 +342,9 @@ class Model(nn.Module):
             label_probability_list.append(label_probability)
 
             policy_p = (one_hot_actions * label_probability).sum(1)
-            policy_log_p = torch.log(policy_p + epsilon)
-            old_policy_p = (one_hot_actions * old_label_probability_list[task_index] + epsilon).sum(1)
-            old_policy_log_p = torch.log(old_policy_p)
+            old_policy_p = (one_hot_actions * old_label_probability_list[task_index]).sum(1)
+            policy_log_p = torch.log(policy_p + self.log_epsilon)
+            old_policy_log_p = torch.log(old_policy_p + self.log_epsilon)
             ratio = torch.exp(policy_log_p - old_policy_log_p)
 
             surr1 = ratio * advantage

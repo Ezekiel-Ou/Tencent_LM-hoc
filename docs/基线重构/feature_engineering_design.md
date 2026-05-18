@@ -286,7 +286,7 @@ camp: int，所属阵营，蓝方=1，红方=2
 | tower relation | 6 | 英雄到敌/我塔距离，塔 `attack_target` | 塔下风险 |
 | hero buff skills | 136 | `buff_state.buff_skills` | 112/133 被动和技能状态主要来源 |
 | hit/take-hurt/recent events | 24 | `hit_target_info`, `take_hurt_infos`, `frame_action` | 最近战斗反馈 |
-| retreat / recall context | 8 | hp、敌方距离、base anchor、button 9 legal | 残血回城、回撤、吃血包前的安全判断 |
+| retreat / force-home context | 8 | hp、敌方距离、base anchor、button 2 legal | 残血回撤、强制走回基地、吃血包前的安全判断 |
 
 ### 4.1 hero id / relation 4 维
 
@@ -465,20 +465,20 @@ targeted_by_self_tower
 
 hit/take-hurt/recent events 24 维：编码最近若干帧是否命中敌方英雄/小兵/塔、是否受到英雄/塔/小兵伤害、最近伤害来源 slot、最近承伤量 ratio、最近命中量 ratio，以及恢复/血包尝试是否被打断。
 
-retreat / recall context 8 维：
+retreat / force-home context 8 维：
 
 ```text
-low_hp_recall_need        = hp_ratio <= 0.30
+low_hp_force_home_need    = hp_ratio <= 0.30
 critical_hp_flag          = hp_ratio <= 0.15
 enemy_near_threat         = enemy_dist <= 8800
 recent_damage_flag        = 最近若干帧受到英雄/塔/小兵伤害
-recall_button_legal       = legal_action[button=9]
+move_button_legal         = legal_action[button=2]
 dist_to_self_base_ratio   = dist(self_hero, self_base_anchor) / 45000
 base_direction_lane_sign  = self_base_lane - self_lane 的符号/归一化
-safe_recall_context       = low_hp 且 enemy_near_threat=0 且 recent_damage_flag=0
+safe_force_home_context   = low_hp 且 enemy_near_threat=0 且 recent_damage_flag=0
 ```
 
-该块不写“残血必须回城”的策略规则，只给模型回城动作所需的可观测上下文。`button=9` 已由 debug/action 约定为 recall；如果平台 legal mask 禁止回城，`recall_button_legal=0`，模型仍受合法动作约束。
+该块不写“残血必须强制回家”的策略规则，只给模型回撤/走回基地所需的可观测上下文。当前任务不使用 `button=9` 回城，移动合法性使用 `button=2`。
 
 ## 5. 英雄 buff skills：`DIM_HERO_BUFF = 136`
 
