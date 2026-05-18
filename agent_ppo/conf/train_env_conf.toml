@@ -56,6 +56,17 @@ hero_id = 133
 [debug]
 # 是否启用 debug agent (默认 false 不影响训练)
 enable_debug_agent = false
+# Focused Luban buff-id logger. Mutually exclusive with enable_debug_agent.
+# Platform usage: set true to force 112 vs 112 and print [LUBAN_BUFF] /
+# [LUBAN_SUMMARY] lines from the scripted sweep/recovery probe.
+enable_luban_buff_debug = true
+luban_buff_debug_max_episodes = 4
+luban_buff_debug_max_frames = 1200
+luban_buff_debug_min_premove_steps = 45
+luban_buff_debug_max_premove_steps = 50
+luban_buff_debug_attack_cooldown_steps = 7
+luban_buff_debug_skill_to_attack_gap_steps = 8
+luban_buff_debug_settle_steps = 30
 # 落盘目录 (相对 train_test.py 工作目录)
 debug_dump_dir = "agent_ppo/debug/dumps"
 # 跑完多少局后退出 (sys.exit(0))

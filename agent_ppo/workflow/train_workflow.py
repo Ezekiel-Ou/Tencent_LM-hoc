@@ -58,6 +58,17 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     # dump observation statistics, then sys.exit(0). Toggled via [debug] in toml.
     # 阶段 A 调试模式: 用固定动作 DebugAgent 驱动 env, 采集 observation 取值范围, 然后 sys.exit(0).
     debug_conf = env_conf_manager.get_current_config().get("debug", {}) if hasattr(env_conf_manager, "get_current_config") else {}
+    if debug_conf.get("enable_debug_agent", False) and debug_conf.get("enable_luban_buff_debug", False):
+        raise ValueError("[debug] enable_debug_agent and enable_luban_buff_debug are mutually exclusive")
+
+    if debug_conf.get("enable_luban_buff_debug", False):
+        if logger is not None:
+            logger.info(f"agent_ppo workflow entering LUBAN_BUFF_DEBUG mode, debug_conf={debug_conf}")
+        episode_runner.run_luban_buff_debug_episodes(debug_conf)
+        if logger is not None:
+            logger.info("agent_ppo workflow LUBAN_BUFF_DEBUG mode finished, exiting.")
+        sys.exit(0)
+
     if debug_conf.get("enable_debug_agent", False):
         if logger is not None:
             logger.info(f"agent_ppo workflow entering DEBUG mode, debug_conf={debug_conf}")
@@ -315,6 +326,150 @@ class EpisodeRunner:
             # Reset agent
             # 重置agent
             agent.reset(observation[str(i)])
+
+    # ===== Luban buff debug helpers =====
+
+    def run_luban_buff_debug_episodes(self, debug_conf):
+        """Focused platform-log debug for Luban sweep and recovery buff ids.
+
+        This path bypasses model load, reward, sampling, DumpCollector, and
+        training. It only drives both camps with the scripted Luban actions and
+        emits logger.info lines when self buff_state changes.
+        """
+        from agent_ppo.debug import (
+            LubanBuffDebugAgent,
+            extract_buff_state,
+            find_luban_hero,
+            format_buff_line,
+            format_summary_line,
+            parse_attack_no,
+        )
+
+        max_episodes = int(debug_conf.get("luban_buff_debug_max_episodes", 4))
+        max_frames = int(debug_conf.get("luban_buff_debug_max_frames", 1200))
+        settle_steps = int(debug_conf.get("luban_buff_debug_settle_steps", 30))
+        debug_agent = LubanBuffDebugAgent(
+            attack_cooldown_steps=int(debug_conf.get("luban_buff_debug_attack_cooldown_steps", 7)),
+            skill_to_attack_gap_steps=int(debug_conf.get("luban_buff_debug_skill_to_attack_gap_steps", 8)),
+            min_premove_steps=int(debug_conf.get("luban_buff_debug_min_premove_steps", 45)),
+            max_premove_steps=int(debug_conf.get("luban_buff_debug_max_premove_steps", 50)),
+        )
+
+        is_train_test = os.environ.get("is_train_test", "False").lower() == "true"
+        side_names = ["blue", "red"]
+        for episode_idx in range(max_episodes):
+            debug_agent.reset_for_episode(episode_idx)
+            usr_conf, _, _ = self.env_conf_manager.update_config([112, 112])
+            self._inject_debug_summoner_skills(usr_conf)
+
+            env_obs = self.env.reset(usr_conf=usr_conf)
+            if handle_disaster_recovery(env_obs, self.logger):
+                break
+
+            observation = env_obs.get("observation", {})
+            last_buff_state = {}
+            skill_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+            mark_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+            attacks_attempted = {camp_idx: 0 for camp_idx in range(self.agent_num)}
+
+            for camp_idx in range(self.agent_num):
+                obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                last_buff_state[camp_idx] = extract_buff_state(find_luban_hero(obs_i))
+
+            step_no = 0
+            frame_no = env_obs.get("frame_no", 0)
+            while True:
+                primary_obs = observation.get("0") if isinstance(observation, dict) else None
+                debug_agent.transition_to_engaged_if_ready(
+                    primary_obs, step_no, find_luban_hero(primary_obs)
+                )
+
+                actions = []
+                tags = []
+                for camp_idx in range(self.agent_num):
+                    obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                    action, tag = debug_agent.act(obs_i or {}, step_no, agent_id=camp_idx)
+                    actions.append(action)
+                    tags.append(tag)
+                    if self._is_luban_attack_attempt(action, tag):
+                        attacks_attempted[camp_idx] += 1
+
+                env_reward, env_obs = self.env.step(actions)
+                if handle_disaster_recovery(env_obs, self.logger):
+                    break
+
+                frame_no = env_obs.get("frame_no", frame_no)
+                observation = env_obs.get("observation", {})
+                terminated = env_obs.get("terminated", 0)
+                truncated = env_obs.get("truncated", 0)
+
+                for camp_idx in range(self.agent_num):
+                    obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                    skills, marks = extract_buff_state(find_luban_hero(obs_i))
+                    current_state = (skills, marks)
+                    if debug_agent.phase == "engaged" and current_state != last_buff_state.get(camp_idx):
+                        self._record_luban_buff_ids(
+                            skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                        )
+                        if self.logger is not None:
+                            side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                            self.logger.info(
+                                format_buff_line(
+                                    "[LUBAN_BUFF]",
+                                    episode_idx,
+                                    step_no,
+                                    frame_no,
+                                    side,
+                                    tags[camp_idx],
+                                    actions[camp_idx],
+                                    parse_attack_no(tags[camp_idx]),
+                                    skills,
+                                    marks,
+                                )
+                            )
+                    last_buff_state[camp_idx] = current_state
+
+                step_no += 1
+                if (
+                    terminated
+                    or truncated
+                    or frame_no >= max_frames
+                    or (is_train_test and frame_no >= 1000)
+                    or debug_agent.episode_done(step_no, settle_steps=settle_steps)
+                ):
+                    break
+
+            for camp_idx in range(self.agent_num):
+                if self.logger is not None:
+                    side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                    self.logger.info(
+                        format_summary_line(
+                            episode_idx,
+                            side,
+                            attacks_attempted[camp_idx],
+                            skill_ids_seen[camp_idx],
+                            mark_ids_seen[camp_idx],
+                            frame_no,
+                        )
+                    )
+
+    @staticmethod
+    def _record_luban_buff_ids(skill_ids_seen, mark_ids_seen, skills, marks):
+        for cid, times in skills:
+            prev = skill_ids_seen.get(cid, 0)
+            skill_ids_seen[cid] = max(prev, 0 if times is None else int(times))
+        for cid, layer in marks:
+            prev = mark_ids_seen.get(cid, 0)
+            mark_ids_seen[cid] = max(prev, 0 if layer is None else int(layer))
+
+    @staticmethod
+    def _is_luban_attack_attempt(action, tag):
+        if not isinstance(tag, str) or "attack#" not in tag:
+            return False
+        try:
+            return int(action[0]) == 3
+        except (TypeError, ValueError, IndexError):
+            return False
 
     # ===== Phase A debug helpers =====
 

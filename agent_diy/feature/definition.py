@@ -67,10 +67,10 @@ def build_frame(agent, observation):
         hero_hp = hero.get("hp", 0)
         if str(hero_camp) == str(agent.hero_camp):
             is_train = hero_hp > 0
-    # When the force-recall rule overrides the action, mark this frame
+    # When a hard rule overrides the action, mark this frame
     # is_train=False so PPO (model.py:311/354/374) zeros its gradient
     # contribution — the stored prob/action no longer match what was executed.
-    if getattr(agent, "recall_override_active", False):
+    if getattr(agent, "rule_override_active", False) or getattr(agent, "recall_override_active", False):
         is_train = False
 
     feature_vec = np.asarray(obs_data.feature, dtype=np.float32).reshape([-1])
