@@ -61,13 +61,7 @@ def build_monitor():
     config = config.end_panel()
 
     config = config.add_panel(name="target_focus", name_en="target_focus", type="line")
-    for metric_name in (
-        "attack_target_enemy_hero_count",
-        "attack_target_enemy_soldier_count",
-        "skill_target_enemy_hero_count",
-        "target_enemy_tower_count",
-        "target_monster_count",
-    ):
+    for metric_name in ("attack_target_enemy_hero_count", "attack_target_enemy_soldier_count"):
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
 
