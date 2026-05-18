@@ -117,14 +117,11 @@ class FeatureProcess:
         self.last_hp = {"self": None, "enemy": None}
         self.last_tower_hp = {"self": None, "enemy": None}
         self.last_buff_set = {"self": set(), "enemy": set()}
-        self.recent_hit_events = deque(maxlen=120)
-        self.recent_take_hurt_events = deque(maxlen=120)
+        self.recent_hit_events = deque(maxlen=15)
+        self.recent_take_hurt_events = deque(maxlen=15)
         self.recent_skill_success = {"self": {}, "enemy": {}}
         self.recent_recover_or_cake_attempt = {"self": -999999, "enemy": -999999}
-        self.recent_recover_attempt_hp = {"self": 0.0, "enemy": 0.0}
-        self.recent_recover_attempt_type = {"self": "", "enemy": ""}
         self.next_cake_frame = {"self": 1778, "enemy": 1778}
-        self.last_cake_exists = {"self": False, "enemy": False}
         self.bullet_cache = {}
         self.runtime_index = {}
         self.self_pos = None
@@ -163,7 +160,6 @@ class FeatureProcess:
         self.self_soldiers, self.enemy_soldiers, self.target_enemy_soldiers = self._split_soldiers(npcs)
         self.monster = self._select_monster(npcs)
         self.self_cake, self.enemy_cake = self._split_cakes(cakes)
-        self._update_cake_attempts()
 
         self._build_runtime_index(heroes, npcs)
         self._update_recent_events()
@@ -418,10 +414,13 @@ class FeatureProcess:
         ]
         return list((button > 0).astype(np.float32)) + target_summary
 
-    def _process_position(self, pos):
+    def _process_position(self, pos, relative_to_self=False):
         if pos is None:
             return [0.0] * Args.DIM_POSITION
         lane, width = pos
+        if relative_to_self and self.self_pos is not None:
+            lane -= self.self_pos[0]
+            width -= self.self_pos[1]
         values = []
         values.extend(self._axis_one_hot(lane, -Args.CENTER_LANE_HALF, Args.CENTER_LANE_HALF, Args.CENTER_LANE_UNIT, Args.DIM_CENTER_LANE))
         values.extend(self._axis_one_hot(width, -Args.CENTER_WIDTH_HALF, Args.CENTER_WIDTH_HALF, Args.CENTER_WIDTH_UNIT, Args.DIM_CENTER_WIDTH))
@@ -723,8 +722,8 @@ class FeatureProcess:
         assert len(values) == Args.DIM_SKILL_SLOT
         if succ > 0:
             self.recent_skill_success[side][slot_idx] = self.frame_no
-        if succ > 0 and (slot_idx == 4 or config_id == 80102):
-            self._record_recover_or_cake_attempt(side, "recover")
+        if succ > 0 and slot_idx in (4, 5):
+            self.recent_recover_or_cake_attempt[side] = self.frame_no
         return values
 
     def _skill_type_tags(self, hero_id, slot_idx, config_id):
@@ -838,11 +837,7 @@ class FeatureProcess:
 
     def _recent_event_feature(self, hero, side):
         runtime = self._runtime_id(hero)
-        recent = [
-            event
-            for event in list(self.recent_hit_events) + list(self.recent_take_hurt_events)
-            if event["side"] == side and self.frame_no - event["frame"] <= 15
-        ]
+        recent = [event for event in list(self.recent_hit_events) + list(self.recent_take_hurt_events) if event["side"] == side]
         hit_hero = any(event.get("kind") == "hit_hero" for event in recent)
         hit_soldier = any(event.get("kind") == "hit_soldier" for event in recent)
         hit_tower = any(event.get("kind") == "hit_tower" for event in recent)
@@ -867,7 +862,7 @@ class FeatureProcess:
             float(hurt_tower),
             float(hurt_soldier),
             float(runtime is not None),
-            self._recent_skill_flag(side),
+            self._recent_flag(side, "skill"),
         ]
         values.extend(_one_hot(last_slot if 0 <= last_slot <= 5 else 6, 7))
         values.extend([last_hurt_ratio, float(self._recent_recover_interrupted(side))])
@@ -931,7 +926,7 @@ class FeatureProcess:
                 float(target_index in (3, 4, 5, 6)),
                 float(target_index == 3),
                 float(target_index == 4),
-                float(target_index == 5),
+                float(target_index == 5 or target_index == 6),
             ]
         )
         values.extend([_clip(_safe_float(_get(soldier, "kill_income", 0), 0.0) / 100.0, 0.0, 1.0), float(self._hp_ratio(soldier) <= 0.25)])
@@ -1228,17 +1223,6 @@ class FeatureProcess:
             legal = float(self.raw_target_legal[target_index] > 0)
         exist = float(target_index == 0 or entity is not None)
         values.extend([exist, legal])
-        # type_idx 5-way one-hot. Implementation maps:
-        #   0 = none/unknown
-        #   1 = enemy_hero  (target_index == 1)
-        #   2 = self_hero   (target_index == 2)
-        #   3 = soldier     (target_index in 3..6)
-        #   4 = tower/monster (target_index in {7, 8})
-        # Note: this swaps positions 1 and 2 vs the textual order in
-        # docs/feature_engineering_design.md section 3.4/10
-        # ([none, self_hero, enemy_hero, soldier, organ_or_monster]).
-        # Functionally equivalent (model learns the mapping from data); kept
-        # as-is to preserve checkpoint compatibility.
         type_idx = 0
         if target_index in (1, 2):
             type_idx = 1 if target_index == 1 else 2
@@ -1368,55 +1352,11 @@ class FeatureProcess:
         events = list(self.recent_hit_events) + list(self.recent_take_hurt_events)
         return float(any(event["side"] == side and event["kind"] == kind and self.frame_no - event["frame"] <= window for event in events))
 
-    def _recent_skill_flag(self, side, window=15):
-        # recent_skill_success is a dict {side: {slot_idx: last_succ_frame}},
-        # not part of the hit/take_hurt event queue, so it must be read directly.
-        return float(any(
-            self.frame_no - frame <= window
-            for frame in self.recent_skill_success.get(side, {}).values()
-        ))
-
     def _recent_recover_interrupted(self, side):
         attempt_frame = self.recent_recover_or_cake_attempt.get(side, -999999)
         if self.frame_no - attempt_frame > 15:
             return 0.0
-        if not self._recent_hurt_after(side, attempt_frame):
-            return 0.0
-        hero = self.self_hero if side == "self" else self.enemy_hero
-        current_hp = self._hp_ratio(hero)
-        attempt_hp = self.recent_recover_attempt_hp.get(side, 0.0)
-        return float(current_hp <= attempt_hp + 0.02)
-
-    def _recent_hurt_after(self, side, attempt_frame, window=15):
-        return any(
-            event["side"] == side
-            and event["kind"] == "hurt_any"
-            and attempt_frame <= event["frame"] <= self.frame_no
-            and self.frame_no - event["frame"] <= window
-            for event in self.recent_take_hurt_events
-        )
-
-    def _record_recover_or_cake_attempt(self, side, attempt_type):
-        hero = self.self_hero if side == "self" else self.enemy_hero
-        self.recent_recover_or_cake_attempt[side] = self.frame_no
-        self.recent_recover_attempt_hp[side] = self._hp_ratio(hero)
-        self.recent_recover_attempt_type[side] = attempt_type
-
-    def _update_cake_attempts(self):
-        for side, cake, anchor in (
-            ("self", self.self_cake, Args.SELF_CAKE_ANCHOR),
-            ("enemy", self.enemy_cake, Args.ENEMY_CAKE_ANCHOR),
-        ):
-            existed = self.last_cake_exists.get(side, False)
-            exists = cake is not None
-            if not existed or exists:
-                continue
-            hero = self.self_hero if side == "self" else self.enemy_hero
-            other = self.enemy_hero if side == "self" else self.self_hero
-            hero_dist = self._dist(self._position(hero), anchor)
-            other_dist = self._dist(self._position(other), anchor)
-            if hero_dist <= 3500 and hero_dist < other_dist:
-                self._record_recover_or_cake_attempt(side, "cake")
+        return self._recent_flag(side, "hurt_any", window=15)
 
     def _bullet_threat_score(self, bullet):
         pos = self._position(bullet)
@@ -1424,7 +1364,7 @@ class FeatureProcess:
         source = self.runtime_index.get(_get(bullet, "source_actor", None), {})
         source_is_enemy_hero = source.get("kind") == "hero" and self._is_enemy_camp(_get(source.get("entity"), "camp", None))
         trajectory = self._bullet_trajectory_feature(bullet, pos)
-        return 3.0 * trajectory[8] + 2.0 * float(source_is_enemy_hero or source.get("kind") is None) + 2.0 * float(near_self) + trajectory[1] + self._recent_skill_flag("enemy")
+        return 3.0 * trajectory[8] + 2.0 * float(source_is_enemy_hero or source.get("kind") is None) + 2.0 * float(near_self) + trajectory[1] + self._recent_flag("enemy", "skill")
 
     def _update_history_after_frame(self, bullets):
         for side, hero in (("self", self.self_hero), ("enemy", self.enemy_hero)):
@@ -1437,8 +1377,6 @@ class FeatureProcess:
             )
         self.last_tower_hp["self"] = self._hp_ratio(self.self_tower)
         self.last_tower_hp["enemy"] = self._hp_ratio(self.enemy_tower)
-        self.last_cake_exists["self"] = self.self_cake is not None
-        self.last_cake_exists["enemy"] = self.enemy_cake is not None
         for bullet in bullets:
             runtime_id = self._runtime_id(bullet)
             pos = self._position(bullet)

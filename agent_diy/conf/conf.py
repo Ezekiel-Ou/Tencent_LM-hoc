@@ -27,12 +27,12 @@ def _unique(values):
 
 class GameConfig:
     HERO_IDS = [112, 133]
-    DEFAULT_SUMMONER_SKILL = 80110
+    DEFAULT_SUMMONER_SKILL = 80115
     SUMMONER_SKILL_IDS = [80102, 80103, 80104, 80105, 80107, 80108, 80109, 80110, 80115, 80121]
     SUMMONER_SKILL_TRAIN_MODE = "cycle"
     SUMMONER_SKILL_CANDIDATES_BY_HERO = {
-        112: [80110, 80115, 80102],
-        133: [80110, 80115, 80102],
+        112: [80115, 80102, 80110, 80107, 80105, 80109],
+        133: [80115, 80102, 80110, 80103, 80108, 80105],
     }
     SUMMONER_SKILL_MONITOR_IDS = SUMMONER_SKILL_IDS.copy()
     LEVEL_MAX_EXP = {
@@ -62,18 +62,6 @@ class GameConfig:
         "kill": 0.6,
         "last_hit": 0.5,
         "forward": 0.2,
-        # Di Renjie (133) skill 2 dispels enemy 133 ultimate. Small weight, only
-        # active in 133v133 mirror matchups.
-        "cleanse_success": 0.15,
-        # Skill (slot 1/2/3) hits on enemy hero. Slot 3 capped at 1 credit per
-        # cast cycle to avoid Luban ultimate bullet-farm bias.
-        "skill_hit_enemy_hero": 0.15,
-        # Eating a health cake while not at full HP (teaches retreat-and-heal).
-        "cake_pickup": 0.8,
-        # Using slot 4 recover skill while low HP (teaches active healing).
-        "recover_skill_low_hp": 0.3,
-        # Last-hit bonus when farming under own tower (safe farming signal).
-        "safe_last_hit": 0.15,
     }
     REMOVE_FORWARD_AFTER = 1000
     REWARD_DEBUG_KEY_LIST = [
