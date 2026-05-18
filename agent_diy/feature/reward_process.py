@@ -77,26 +77,6 @@ class GameRewardManager:
         self.m_each_level_max_exp = {}
         self.has_last_frame = False
         self.m_last_hit_debug = self._empty_last_hit_debug()
-        # Cleanse detection state for 133v133 mirror matchups.
-        self.prev_main_ult_buffs = set()
-        self.prev_enemy_ult_buffs = set()
-        self._cleanse_main_count = 0
-        self._cleanse_enemy_count = 0
-        # Skill-hit detection state. slot3_armed/credit/frame tracked per side so
-        # Luban ult bullet-farm only credits once per cast cycle.
-        self._skill_hit_main_count = 0
-        self._skill_hit_enemy_count = 0
-        self.slot3_armed = {"main": False, "enemy": False}
-        self.slot3_credit_used = {"main": False, "enemy": False}
-        self.slot3_armed_frame = {"main": -10000, "enemy": -10000}
-        # Cake pickup detection: track cake positions and main hero HP from previous frame.
-        self.prev_cake_locs = set()
-        self.prev_main_hp = None
-        self._cake_pickup_count = 0
-        # Recover-skill-at-low-HP detection (slot 4 use while hp_rate < 0.5).
-        self._recover_low_hp_count = 0
-        # Safe last_hit detection (last_hit while inside own tower attack range).
-        self._safe_last_hit_count = 0
         self.init_max_exp_of_each_hero()
 
     def init_max_exp_of_each_hero(self):
@@ -140,43 +120,6 @@ class GameRewardManager:
                 reward_struct.cur_frame_value = self.calculate_exp_sum(main_hero)
             elif reward_name == "forward":
                 reward_struct.cur_frame_value = self.calculate_forward(main_hero, main_tower, enemy_tower)
-            elif reward_name == "cleanse_success":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(
-                        self._cleanse_main_count - self._cleanse_enemy_count
-                    )
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            elif reward_name == "skill_hit_enemy_hero":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(
-                        self._skill_hit_main_count - self._skill_hit_enemy_count
-                    )
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            elif reward_name == "cake_pickup":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(self._cake_pickup_count)
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            elif reward_name == "recover_skill_low_hp":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(self._recover_low_hp_count)
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            elif reward_name == "safe_last_hit":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    # Reuse m_last_hit_debug populated by the last_hit branch above
-                    # (REWARD_WEIGHT_DICT order guarantees last_hit precedes safe_last_hit).
-                    main_kill_count = self.m_last_hit_debug.get("last_hit_main_count", 0)
-                    if main_kill_count > 0 and self._is_under_own_tower(main_hero, main_tower):
-                        reward_struct.cur_frame_value = float(main_kill_count)
-                        self._safe_last_hit_count = int(main_kill_count)
-                    else:
-                        reward_struct.cur_frame_value = 0.0
-                        self._safe_last_hit_count = 0
-                else:
-                    reward_struct.cur_frame_value = 0.0
 
     def calculate_exp_sum(self, hero):
         exp_sum = 0.0
@@ -202,24 +145,13 @@ class GameRewardManager:
 
     def frame_data_process(self, frame_data):
         main_camp, enemy_camp = -1, -1
-        main_hero, enemy_hero = None, None
 
         for hero in frame_data.get("hero_states", []):
             if self._is_main_hero(hero):
                 main_camp = _get(hero, "camp")
                 self.main_hero_camp = main_camp
-                main_hero = hero
             else:
                 enemy_camp = _get(hero, "camp")
-                enemy_hero = hero
-        self._cleanse_main_count, self._cleanse_enemy_count = self._compute_cleanse_events(
-            main_hero, enemy_hero
-        )
-        self._skill_hit_main_count, self._skill_hit_enemy_count = self._compute_skill_hit_events(
-            frame_data, main_hero, enemy_hero
-        )
-        self._cake_pickup_count = self._detect_cake_pickup(frame_data, main_hero, enemy_hero)
-        self._recover_low_hp_count = self._detect_recover_low_hp(main_hero)
         self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
         self.set_cur_calc_frame_vec(self.m_enemy_calc_frame_map, frame_data, enemy_camp)
 
@@ -248,16 +180,6 @@ class GameRewardManager:
                 if GameConfig.REMOVE_FORWARD_AFTER is not None and frame_no > GameConfig.REMOVE_FORWARD_AFTER:
                     reward_struct.value = 0.0
             elif reward_name == "last_hit":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "cleanse_success":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "skill_hit_enemy_hero":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "cake_pickup":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "recover_skill_low_hp":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "safe_last_hit":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             else:
                 reward_struct.cur_frame_value = (
@@ -382,229 +304,3 @@ class GameRewardManager:
             key=lambda item: _get_any(item, ["frameNo", "frame_no", "frame"], -1),
         )
         return _get_any(last_hurt, ["runtime_id", "runtimeId"], None)
-
-    def _is_di_renjie(self, hero):
-        if hero is None:
-            return False
-        hero_id = _get_any(hero, ["config_id", "configId", "hero_id", "heroId"], 0)
-        try:
-            return int(hero_id or 0) == 133
-        except (TypeError, ValueError):
-            return False
-
-    def _extract_ult_buffs(self, hero):
-        # Buffs starting with "1333" cover Di Renjie's ultimate self-buff cluster.
-        if hero is None:
-            return set()
-        buff_skills = _get(_get(hero or {}, "buff_state", {}) or {}, "buff_skills", []) or []
-        result = set()
-        for buff in buff_skills:
-            bid = _get_any(buff, ["config_id", "configId", "skill_id", "skillId"], 0)
-            try:
-                bid_int = int(bid or 0)
-            except (TypeError, ValueError):
-                continue
-            if bid_int > 0 and str(bid_int).startswith("1333"):
-                result.add(bid_int)
-        return result
-
-    def _used_skill2(self, hero):
-        if hero is None:
-            return False
-        slots = _get(_get(hero or {}, "skill_state", {}) or {}, "slot_states", []) or []
-        for slot in slots:
-            slot_type = _get(slot, "slot_type", None)
-            if isinstance(slot_type, int):
-                slot_idx = slot_type
-            else:
-                text = str(slot_type) if slot_type is not None else ""
-                if text.startswith("SLOT_SKILL_"):
-                    try:
-                        slot_idx = int(text.split("_")[-1])
-                    except (TypeError, ValueError):
-                        slot_idx = -1
-                else:
-                    try:
-                        slot_idx = int(slot_type) if slot_type is not None else -1
-                    except (TypeError, ValueError):
-                        slot_idx = -1
-            if slot_idx == 2:
-                succ = _get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0)
-                try:
-                    return float(succ) > 0
-                except (TypeError, ValueError):
-                    return False
-        return False
-
-    def _compute_cleanse_events(self, main_hero, enemy_hero):
-        # Returns (main_cleansed, enemy_cleansed) for the current frame.
-        # Only triggers in 133 vs 133 matchups; otherwise tracked state is reset.
-        if not self._is_di_renjie(main_hero) or not self._is_di_renjie(enemy_hero):
-            self.prev_main_ult_buffs = set()
-            self.prev_enemy_ult_buffs = set()
-            return 0, 0
-
-        main_ult_buffs = self._extract_ult_buffs(main_hero)
-        enemy_ult_buffs = self._extract_ult_buffs(enemy_hero)
-        main_used_skill2 = self._used_skill2(main_hero)
-        enemy_used_skill2 = self._used_skill2(enemy_hero)
-
-        enemy_lost = self.prev_enemy_ult_buffs - enemy_ult_buffs
-        main_lost = self.prev_main_ult_buffs - main_ult_buffs
-
-        main_cleansed = 1 if (enemy_lost and main_used_skill2) else 0
-        enemy_cleansed = 1 if (main_lost and enemy_used_skill2) else 0
-
-        self.prev_main_ult_buffs = main_ult_buffs
-        self.prev_enemy_ult_buffs = enemy_ult_buffs
-        return main_cleansed, enemy_cleansed
-
-    def _slot_idx(self, slot_type):
-        if isinstance(slot_type, int):
-            return slot_type
-        text = str(slot_type) if slot_type is not None else ""
-        if text.startswith("SLOT_SKILL_"):
-            try:
-                return int(text.split("_")[-1])
-            except (TypeError, ValueError):
-                return -1
-        try:
-            return int(slot_type) if slot_type is not None else -1
-        except (TypeError, ValueError):
-            return -1
-
-    def _slot_succ_used(self, hero, target_slot):
-        if hero is None:
-            return False
-        slots = _get(_get(hero or {}, "skill_state", {}) or {}, "slot_states", []) or []
-        for slot in slots:
-            if self._slot_idx(_get(slot, "slot_type", None)) != target_slot:
-                continue
-            succ = _get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0)
-            try:
-                return float(succ) > 0
-            except (TypeError, ValueError):
-                return False
-        return False
-
-    def _count_skill_hits_on(self, victim, attacker_runtime, attacker_side):
-        # Walk victim.take_hurt_infos and count skill 1/2/3 hits attributed to attacker.
-        # Slot 3 hits are capped via attacker_side's armed/credit_used state.
-        if victim is None or attacker_runtime is None:
-            return 0
-        hurts = _get(victim, "take_hurt_infos", []) or []
-        count = 0
-        for hurt in hurts:
-            atker = _get_any(hurt, ["atker", "attacker"], None)
-            if atker != attacker_runtime:
-                continue
-            slot_int = self._slot_idx(_get_any(hurt, ["skillSlot", "skill_slot"], -1))
-            if slot_int not in (1, 2, 3):
-                continue
-            try:
-                hurt_val = float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if hurt_val <= 0:
-                continue
-            if slot_int == 3:
-                if self.slot3_armed.get(attacker_side, False) and not self.slot3_credit_used.get(attacker_side, False):
-                    count += 1
-                    self.slot3_credit_used[attacker_side] = True
-            else:
-                count += 1
-        return count
-
-    def _compute_skill_hit_events(self, frame_data, main_hero, enemy_hero):
-        # Positive-only: reward our skill 1/2/3 hits on enemy hero (slot 3 capped).
-        # No penalty for being hit by enemy — hp_point already covers that, and
-        # adding a negative signal risks over-defensive play.
-        SLOT3_TIMEOUT = 200
-        frame_no = frame_data.get("frame_no", frame_data.get("frameNo", 0))
-
-        if self.slot3_armed.get("main", False) and frame_no - self.slot3_armed_frame.get("main", -10000) > SLOT3_TIMEOUT:
-            self.slot3_armed["main"] = False
-            self.slot3_credit_used["main"] = False
-        if self._slot_succ_used(main_hero, 3):
-            self.slot3_armed["main"] = True
-            self.slot3_credit_used["main"] = False
-            self.slot3_armed_frame["main"] = frame_no
-
-        main_runtime = self._actor_runtime(main_hero)
-        main_hits = self._count_skill_hits_on(enemy_hero, main_runtime, "main")
-        return main_hits, 0
-
-    def _detect_cake_pickup(self, frame_data, main_hero, enemy_hero):
-        # Detect: cake disappeared this frame + main hero is the closer one to it +
-        # main hero's hp_rate < 1.0 + main hero's hp jumped up.
-        # Returns 1 per cake we ate this frame, else 0.
-        cakes = frame_data.get("cakes", []) or []
-        current_locs = set()
-        for cake in cakes:
-            collider = _get(cake or {}, "collider", {}) or {}
-            loc = _get(collider, "location", {}) or _get(cake or {}, "location", {}) or {}
-            x = float(_get(loc, "x", 0) or 0)
-            z = float(_get(loc, "z", 0) or 0)
-            current_locs.add((x, z))
-
-        disappeared = self.prev_cake_locs - current_locs
-        self.prev_cake_locs = current_locs
-
-        if not disappeared or main_hero is None:
-            self.prev_main_hp = _get(main_hero, "hp", None) if main_hero else None
-            return 0
-
-        main_loc = _get(main_hero, "location", {}) or {}
-        main_pos = (float(_get(main_loc, "x", 0) or 0), float(_get(main_loc, "z", 0) or 0))
-        main_hp = float(_get(main_hero, "hp", 0) or 0)
-        main_max_hp = float(_get(main_hero, "max_hp", 1) or 1)
-        hp_rate = main_hp / max(main_max_hp, 1.0)
-        hp_jump = main_hp - (self.prev_main_hp if self.prev_main_hp is not None else main_hp)
-        self.prev_main_hp = main_hp
-
-        if hp_rate >= 1.0:
-            return 0
-        if hp_jump < 100:
-            return 0
-
-        enemy_loc = _get(enemy_hero, "location", {}) if enemy_hero else None
-        enemy_pos = None
-        if enemy_loc:
-            enemy_pos = (float(_get(enemy_loc, "x", 0) or 0), float(_get(enemy_loc, "z", 0) or 0))
-
-        count = 0
-        for cake_pos in disappeared:
-            d_main = ((main_pos[0] - cake_pos[0]) ** 2 + (main_pos[1] - cake_pos[1]) ** 2) ** 0.5
-            if d_main > 1500:
-                continue
-            if enemy_pos is not None:
-                d_enemy = ((enemy_pos[0] - cake_pos[0]) ** 2 + (enemy_pos[1] - cake_pos[1]) ** 2) ** 0.5
-                if d_enemy < d_main:
-                    continue
-            count += 1
-        return count
-
-    def _detect_recover_low_hp(self, main_hero):
-        # Detect: main hero used slot 4 (recover skill) this frame while hp_rate < 0.5.
-        if main_hero is None:
-            return 0
-        main_hp = float(_get(main_hero, "hp", 0) or 0)
-        main_max_hp = float(_get(main_hero, "max_hp", 1) or 1)
-        hp_rate = main_hp / max(main_max_hp, 1.0)
-        if hp_rate >= 0.5:
-            return 0
-        if self._slot_succ_used(main_hero, 4):
-            return 1
-        return 0
-
-    def _is_under_own_tower(self, main_hero, main_tower):
-        if main_hero is None or main_tower is None:
-            return False
-        main_loc = _get(main_hero, "location", {}) or {}
-        tower_loc = _get(main_tower, "location", {}) or {}
-        main_x = float(_get(main_loc, "x", 0) or 0)
-        main_z = float(_get(main_loc, "z", 0) or 0)
-        tower_x = float(_get(tower_loc, "x", 0) or 0)
-        tower_z = float(_get(tower_loc, "z", 0) or 0)
-        dist = ((main_x - tower_x) ** 2 + (main_z - tower_z) ** 2) ** 0.5
-        return dist <= 8800

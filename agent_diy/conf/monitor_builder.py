@@ -61,29 +61,8 @@ def build_monitor():
     config = config.end_panel()
 
     config = config.add_panel(name="target_focus", name_en="target_focus", type="line")
-    for metric_name in (
-        "attack_target_enemy_hero_count",
-        "attack_target_enemy_soldier_count",
-        "skill_target_enemy_hero_count",
-        "target_enemy_tower_count",
-        "target_monster_count",
-    ):
+    for metric_name in ("attack_target_enemy_hero_count", "attack_target_enemy_soldier_count"):
         config = _add_metric(config, metric_name, "0.01")
-    config = config.end_panel()
-
-    config = config.add_panel(name="rule_intervention", name_en="rule_intervention", type="line")
-    config = _add_metric(config, "rule_override_count", "0.01")
-    config = config.end_panel()
-
-    config = config.add_panel(name="new_reward_signals", name_en="new_reward_signals", type="line")
-    for metric_name in (
-        "reward_cleanse_success",
-        "reward_skill_hit_enemy_hero",
-        "reward_cake_pickup",
-        "reward_recover_skill_low_hp",
-        "reward_safe_last_hit",
-    ):
-        config = _add_metric(config, metric_name, "0.0001")
     config = config.end_panel()
 
     return config.end_group().build()

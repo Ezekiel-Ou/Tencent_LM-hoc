@@ -28,20 +28,18 @@ opponent_agent = "mixed"
 # 混合训练对手池；自定义模型 ID 需要先上传到模型管理，并写入 kaiwu.json。
 opponent_agent_types = [
     "selfplay",
-    "263170",
-    "263062",
     "common_ai",
+    "254424",
 ]
 opponent_agent_weights = [
-    0.55,
-    0.25,
-    0.15,
-    0.05,
+    0.4,
+    0.3,
+    0.3,
 ]
 
 # Evaluation interval (unit: games). Type: integer, value range: integer >= 2, default: 10
 # 评估间隔(单位局)，类型整型，取值范围为大于等于2的整数，默认值10
-eval_interval = 20
+eval_interval = 10
 
 # Evaluation opponent type, Type: string, value range: [selfplay, common_ai, custom model ID]
 # Please refer to the opponent agent annotation for the meaning of the value
@@ -54,8 +52,7 @@ eval_opponent_type = "common_ai"
 # IDs from kaiwu.json here after they are available in the model pool.
 eval_opponent_types = [
     "common_ai",
-    "263170",
-    "255479",
+    "254424",
 ]
 
 # Blue camp lineup configuration

@@ -103,13 +103,6 @@ class Agent(BaseAgent):
         self.monitor = monitor
         self.algorithm = Algorithm(self.model, self.optimizer, self.scheduler, self.device, self.logger, self.monitor)
 
-        # Force-recall rule state (used by _maybe_force_recall).
-        self.own_cake_exists = False
-        self.last_own_cake_disappear_frame = -10000
-        self.prev_dead_cnt = 0
-        self.recall_override_active = False
-        self.rule_override_count = 0
-
         super().__init__(agent_type, device, logger, monitor)
 
     def lr_lambda(self, step):
@@ -131,8 +124,14 @@ class Agent(BaseAgent):
         return select_skills
 
     def _default_summoner_skill(self, my_hero, opponent_hero):
-        # Eval / match always uses the configured default (currently 80110 狂暴).
-        # Training cycle path also falls back here when candidates are exhausted.
+        if my_hero == 112 and opponent_hero == 112:
+            return 80115
+        if my_hero == 112 and opponent_hero == 133:
+            return 80107
+        if my_hero == 133 and opponent_hero == 112:
+            return 80103
+        if my_hero == 133 and opponent_hero == 133:
+            return 80108
         return GameConfig.DEFAULT_SUMMONER_SKILL
 
     def _select_train_summoner_skill(self, my_hero, opponent_hero):
@@ -163,12 +162,6 @@ class Agent(BaseAgent):
         self.lstm_cell = np.zeros([self.lstm_unit_size], dtype=np.float32)
         self.reward_manager = GameRewardManager(self.player_id)
         self.feature_processes = FeatureProcess(self.hero_camp, logger=self.logger)
-        # Reset force-recall rule state per episode.
-        self.own_cake_exists = False
-        self.last_own_cake_disappear_frame = -10000
-        self.prev_dead_cnt = 0
-        self.recall_override_active = False
-        self.rule_override_count = 0
 
     def _model_inference(self, list_obs_data):
         feature = [obs_data.feature for obs_data in list_obs_data]
@@ -219,16 +212,14 @@ class Agent(BaseAgent):
         obs_data = self.observation_process(observation)
         act_data = self._model_inference([obs_data])[0]
         self.update_status(obs_data, act_data)
-        action = self.action_process(observation, act_data, True)
-        return self._maybe_force_recall(observation, action)
+        return self.action_process(observation, act_data, True)
 
     @exploit_wrapper
     def exploit(self, observation):
         obs_data = self.observation_process(observation)
         act_data = self._model_inference([obs_data])[0]
         self.update_status(obs_data, act_data)
-        action = self.action_process(observation, act_data, False)
-        return self._maybe_force_recall(observation, action)
+        return self.action_process(observation, act_data, False)
 
     def observation_process(self, observation):
         if self.feature_processes is None:
@@ -252,134 +243,6 @@ class Agent(BaseAgent):
     def action_process(self, observation, act_data, is_stochastic):
         action = act_data.action if is_stochastic else act_data.d_action
         return self._normalize_action(action)
-
-    def _maybe_force_recall(self, observation, action):
-        # Force button=9 (recall) when conditions match. Sets recall_override_active
-        # so build_frame can mark these frames is_train=False (skip from PPO update).
-        self.recall_override_active = False
-
-        frame_state = observation.get("frame_state", {}) or {}
-        frame_no = frame_state.get("frame_no", frame_state.get("frameNo", 0)) or 0
-
-        # Condition 1: pre-cannon era (frame < 6254, the canonical cannon marker).
-        if frame_no >= 6254:
-            return action
-
-        main_hero, enemy_hero, main_tower = self._find_my_hero_and_tower(frame_state)
-        if main_hero is None:
-            return action
-
-        # Death detection: reset state and skip override on death.
-        dead_cnt = int(main_hero.get("dead_cnt", 0) or 0)
-        if dead_cnt > self.prev_dead_cnt:
-            self.prev_dead_cnt = dead_cnt
-            return action
-        self.prev_dead_cnt = dead_cnt
-
-        # Condition 2: self hp_rate < 0.20.
-        max_hp = float(main_hero.get("max_hp", 1) or 1)
-        hp = float(main_hero.get("hp", 0) or 0)
-        if hp / max(max_hp, 1.0) >= 0.20:
-            return action
-
-        # Condition 3: own tower hp_rate > 0.50.
-        if main_tower is not None:
-            t_hp = float(main_tower.get("hp", 0) or 0)
-            t_max = float(main_tower.get("max_hp", 1) or 1)
-            if t_hp / max(t_max, 1.0) <= 0.50:
-                return action
-
-        # Condition 4: no enemy hero within 10000 (continuous check).
-        if enemy_hero is not None:
-            main_loc = main_hero.get("location", {}) or {}
-            enemy_loc = enemy_hero.get("location", {}) or {}
-            dx = float(main_loc.get("x", 0) or 0) - float(enemy_loc.get("x", 0) or 0)
-            dz = float(main_loc.get("z", 0) or 0) - float(enemy_loc.get("z", 0) or 0)
-            if (dx * dx + dz * dz) ** 0.5 < 10000:
-                return action
-
-        # Condition 5: recall (button 9) legal this frame.
-        legal_action = observation.get("legal_action", []) or []
-        if len(legal_action) <= 9 or int(legal_action[9] or 0) != 1:
-            return action
-
-        # Condition 6: own cake unavailable AND not respawning within 5s.
-        self._update_own_cake_state(frame_state, frame_no)
-        if self.own_cake_exists:
-            return action
-        # Cake respawn cycle = 75s * 30fps = 2250 frames. "Within 5s" = 150 frames before respawn.
-        respawn_frame = self.last_own_cake_disappear_frame + 2250
-        if respawn_frame - frame_no <= 150 and respawn_frame > frame_no:
-            return action
-
-        # Condition 7: recover skill (slot 4) unavailable.
-        if self._is_recover_skill_available(main_hero):
-            return action
-
-        # All conditions met: override action to recall.
-        self.recall_override_active = True
-        self.rule_override_count += 1
-        # button=9 (recall), default direction slots, target=none.
-        return [9, 15, 15, 15, 15, 0]
-
-    def _find_my_hero_and_tower(self, frame_state):
-        main_hero = None
-        enemy_hero = None
-        main_tower = None
-        main_camp_str = str(self.hero_camp)
-        for hero in frame_state.get("hero_states", []) or []:
-            if str(hero.get("camp")) == main_camp_str:
-                main_hero = hero
-            else:
-                enemy_hero = hero
-        for npc in frame_state.get("npc_states", []) or []:
-            sub_type = npc.get("sub_type", None)
-            if sub_type not in (21, "21", "ACTOR_SUB_TOWER"):
-                continue
-            if str(npc.get("camp")) == main_camp_str:
-                main_tower = npc
-                break
-        return main_hero, enemy_hero, main_tower
-
-    def _update_own_cake_state(self, frame_state, frame_no):
-        cakes = frame_state.get("cakes", []) or []
-        # Own side is x<0 for camp 1 (blue at -40000), x>0 for camp 2 (red at +40000).
-        own_x_sign = -1 if str(self.hero_camp) in ("1", "PLAYERCAMP_1", "blue_camp") else 1
-        found_own = False
-        for cake in cakes:
-            collider = cake.get("collider", {}) or {}
-            loc = collider.get("location", {}) or cake.get("location", {}) or {}
-            x = float(loc.get("x", 0) or 0)
-            if own_x_sign * x > 0:
-                found_own = True
-                break
-        if self.own_cake_exists and not found_own:
-            self.last_own_cake_disappear_frame = frame_no
-        self.own_cake_exists = found_own
-
-    def _is_recover_skill_available(self, main_hero):
-        slots = (main_hero.get("skill_state", {}) or {}).get("slot_states", []) or []
-        for slot in slots:
-            if self._slot_idx(slot.get("slot_type", None)) != 4:
-                continue
-            usable = bool(slot.get("usable", False))
-            cooldown = float(slot.get("cooldown", 0) or 0)
-            return usable and cooldown <= 0
-        return False
-
-    def _slot_idx(self, slot_type):
-        if isinstance(slot_type, int):
-            return slot_type
-        text = str(slot_type) if slot_type is not None else ""
-        if text.startswith("SLOT_SKILL_"):
-            try:
-                return int(text.split("_")[-1])
-            except (TypeError, ValueError):
-                return -1
-        try:
-            return int(slot_type) if slot_type is not None else -1
-        except (TypeError, ValueError):
-            return -1
 
     @learn_wrapper
     def learn(self, list_sample_data):

@@ -234,9 +234,6 @@ class EpisodeRunner:
                             selected_skill = self.selected_summoner_skills[monitor_side]
                             for skill_id in GameConfig.SUMMONER_SKILL_MONITOR_IDS:
                                 monitor_data[f"selected_summoner_{skill_id}"] = 1.0 if selected_skill == skill_id else 0.0
-                            monitor_data["rule_override_count"] = float(
-                                getattr(self.agents[monitor_side], "rule_override_count", 0)
-                            )
                             self.monitor.put_data({os.getpid(): monitor_data})
                             self.last_report_monitor_time = now
 
@@ -274,8 +271,6 @@ class EpisodeRunner:
             agent.reset(observation[str(i)])
 
     def _debug_observation(self, env_obs, prefix=""):
-        if os.environ.get("OBS_DEBUG", "False").lower() != "true":
-            return
         try:
             obs = env_obs.get("observation", {})
             if not obs:
