@@ -59,21 +59,42 @@ class GameConfig:
         "exp": 0.004,
         "ep_rate": 0.25,
         "death": -1.0,
-        "kill": 0.6,
+        "kill": 0.8,
         "last_hit": 0.5,
-        "forward": 0.2,
+        "forward": 0.1,
         # Di Renjie (133) skill 2 dispels enemy 133 ultimate. Small weight, only
         # active in 133v133 mirror matchups.
         "cleanse_success": 0.15,
-        # Skill (slot 1/2/3) hits on enemy hero. Slot 3 capped at 1 credit per
-        # cast cycle to avoid Luban ultimate bullet-farm bias.
-        "skill_hit_enemy_hero": 0.15,
-        # Eating a health cake while not at full HP (teaches retreat-and-heal).
-        "cake_pickup": 0.8,
+        # Hero/skill-specific hit rewards. Di Renjie skill 2 is intentionally
+        # excluded here; its value is covered by cleanse_success.
+        "luban_skill1_hit_enemy_soldier": 0.10,
+        "luban_skill1_hit_enemy_hero": 0.25,
+        "luban_skill2_hit_enemy_hero": 0.25,
+        "luban_skill3_hit_enemy_hero": 0.25,
+        "direnjie_skill1_hit_enemy_hero": 0.10,
+        "direnjie_skill3_hit_enemy_hero": 0.40,
+        "direnjie_skill3_followup_damage": 0.10,
+        # Eating a health cake. The event value is tiered by pre-pickup HP:
+        # hp<0.9 => 0.3, hp<0.5 => 0.5, hp<0.2 => 1.0.
+        "cake_pickup": 1.0,
         # Using slot 4 recover skill while low HP (teaches active healing).
         "recover_skill_low_hp": 0.3,
         # Last-hit bonus when farming under own tower (safe farming signal).
         "safe_last_hit": 0.15,
+        # Scenario shaping: when own minions tank enemy tower and the enemy hero
+        # is dead/far, reward active tower pressure and penalize idle drift.
+        "minion_tower_push": 1.0,
+        # Before cannon wave, enemy-dead + minion-tanking context can justify
+        # invading the enemy health cake. This is intentionally small.
+        "enemy_dead_enemy_cake": 1.0,
+        # Terminal sparse reward injected at game over. Weight stays 1.0; the
+        # event value is +/- TERMINAL_WIN_REWARD.
+        "win": 1.0,
+        # Summoner 80110 (berserk) timing: +0.5 when followed by engagement,
+        # -0.8 when wasted outside engagement.
+        "berserk_timing": 1.0,
+        # Workflow-injected action penalty once no-op streak reaches threshold.
+        "no_op_streak_penalty": 1.0,
     }
     REMOVE_FORWARD_AFTER = 1000
     REWARD_DEBUG_KEY_LIST = [
@@ -81,6 +102,9 @@ class GameConfig:
         "last_hit_soldier_dead_count",
         "last_hit_main_count",
         "last_hit_enemy_count",
+        "recover_attempt_count",
+        "recover_success_count",
+        "recover_interrupted_count",
     ]
     ACTION_DEBUG_KEY_LIST = [
         "action_noop_count",
@@ -106,7 +130,63 @@ class GameConfig:
         "recover_used_count",
         "summoner_skill_used_count",
     ]
+    LUBAN_SKILL1_AIM_ASSIST = True
+    LUBAN_SKILL1_AIM_RANGE = 8800.0
+    LUBAN_SKILL1_AIM_CENTER = 8
+    LUBAN_SKILL1_AIM_TARGET = 1
+    TERMINAL_WIN_REWARD = 3.0
+    LUBAN_SKILL1_SOLDIER_HIT_WINDOW = 12
+    LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
+    DI_RENJIE_SKILL3_FOLLOWUP_WINDOW = 30
+    TOWER_PUSH_TOWER_RANGE_FALLBACK = 8800.0
+    TOWER_PUSH_HERO_ATTACK_RANGE_FALLBACK = 8800.0
+    TOWER_PUSH_ENEMY_FAR_RANGE = 12000.0
+    TOWER_PUSH_MIN_SOLDIERS = 1
+    TOWER_PUSH_EVAL_INTERVAL = 10
+    TOWER_PUSH_REWARD = 0.08
+    TOWER_PUSH_APPROACH_REWARD = 0.04
+    TOWER_PUSH_IDLE_PENALTY = -0.08
+    TOWER_PUSH_APPROACH_DELTA = 120.0
+    ENEMY_DEAD_CAKE_MIN_SOLDIERS = 2
+    ENEMY_DEAD_CAKE_EVAL_INTERVAL = 10
+    ENEMY_DEAD_CAKE_APPROACH_REWARD = 0.04
+    ENEMY_DEAD_CAKE_NEAR_REWARD = 0.06
+    ENEMY_DEAD_CAKE_APPROACH_DELTA = 120.0
+    ENEMY_DEAD_CAKE_NEAR_RANGE = 1500.0
+    CANNON_FRAME = 6254
+    DEATH_MULTIPLIER_BEFORE_CANNON = 0.7
+    DEATH_MULTIPLIER_AFTER_CANNON = 1.3
+    DEATH_MULTIPLIER_ENEMY_TOWER_LOW_HP = 1.0
+    DEATH_MULTIPLIER_ENEMY_TOWER_HP_THRESHOLD = 0.25
+    BERSERK_SKILL_ID = 80110
+    BERSERK_LOOKAHEAD_FRAMES = 20
+    BERSERK_ENGAGE_RANGE = 7000.0
+    BERSERK_GOOD_REWARD = 0.5
+    BERSERK_WASTED_REWARD = -0.8
+    NO_OP_STREAK_THRESHOLD = 5
+    NO_OP_STREAK_REWARD = -0.1
+    FORCE_HOME_HP_TRIGGER = 0.20
+    FORCE_HOME_HP_RECOVERED = 0.80
+    FORCE_HOME_TOWER_HP_MIN = 0.40
+    FORCE_HOME_ENEMY_SAFE_RANGE = 9000.0
+    FORCE_HOME_RETURN_RADIUS = 2500.0
+    FORCE_HOME_DIRECTION_DEADZONE = 500.0
+    RECOVER_CONFIRM_FRAMES = 15
+    RECOVER_HP_GAIN_THRESHOLD = 200.0
+    RECOVER_START_BUFF_ID = 10000
+    RECOVER_EFFECT_BUFF_ID = 10010
     TIME_SCALE_ARG = 8000
+    REWARD_TIME_SCALE_OVERRIDES = {
+        "kill": 0.0,
+        "death": 0.0,
+        "tower_hp_point": 0.0,
+        "cleanse_success": 0.0,
+        "minion_tower_push": 0.0,
+        "enemy_dead_enemy_cake": 0.0,
+        "win": 0.0,
+        "berserk_timing": 0.0,
+        "no_op_streak_penalty": 0.0,
+    }
     REWARD_WITHOUT_TIME_SCALE = set()
     MODEL_SAVE_INTERVAL = 1800
 
@@ -258,30 +338,35 @@ class Args:
             133390,
             133950,
             133951,
-            # Historical hok_semi-style candidates retained only if room remains.
+            # Known observed IDs missing from the previous whitelist (v1.2.md section 9.1).
+            90025,
+            112190,
+            112191,
+            112192,
+            167600,
+            801020,
+            801070,
+            801100,
+            911261,
+            911350,
+            911354,
+            911355,
+            911357,
+            911359,
+            911580,
+            911581,
+            912260,
+            912262,
+            912263,
+            912300,
+            913270,
+            913271,
+            # Retained fallback candidates: P1 hok_semi generic/unknown, then two P2 hero representatives.
             11111,
             911220,
             914250,
             112110,
-            112120,
-            112130,
-            112220,
-            112230,
-            112310,
-            112920,
-            112930,
             133030,
-            133040,
-            133110,
-            133120,
-            133130,
-            133210,
-            133220,
-            133230,
-            133900,
-            133910,
-            133920,
-            133930,
         ]
     )
     BUFF_WHITELIST_96 = (BUFF_SOURCE_IDS + list(range(990000, 990000 + 96)))[:96]
