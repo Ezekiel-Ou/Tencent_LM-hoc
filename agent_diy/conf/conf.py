@@ -29,12 +29,18 @@ class GameConfig:
     HERO_IDS = [112, 133]
     DEFAULT_SUMMONER_SKILL = 80110
     SUMMONER_SKILL_IDS = [80102, 80103, 80104, 80105, 80107, 80108, 80109, 80110, 80115, 80121]
+    DUEL_SUMMONER_SKILL_IDS = [80110, 80121]
     SUMMONER_SKILL_TRAIN_MODE = "cycle"
     SUMMONER_SKILL_CANDIDATES_BY_HERO = {
-        112: [80110, 80115, 80102],
-        133: [80110, 80115, 80102],
+        112: DUEL_SUMMONER_SKILL_IDS.copy(),
+        133: DUEL_SUMMONER_SKILL_IDS.copy(),
     }
-    SUMMONER_SKILL_MONITOR_IDS = SUMMONER_SKILL_IDS.copy()
+    SUMMONER_SKILL_MATCHUP_WINRATE = {
+        (112, 112): {80110: 0.0, 80121: 0.0},
+        (112, 133): {80110: 0.0, 80121: 0.0},
+        (133, 112): {80110: 0.0, 80121: 0.0},
+        (133, 133): {80110: 0.0, 80121: 0.0},
+    }
     LEVEL_MAX_EXP = {
         1: 160,
         2: 298,
@@ -91,28 +97,28 @@ class GameConfig:
         # Terminal sparse reward injected at game over. Weight stays 1.0; the
         # event value is +/- TERMINAL_WIN_REWARD.
         "win": 1.0,
-        # Summoner 80110 (berserk) timing: +0.5 when followed by engagement,
-        # -0.8 when wasted outside engagement.
-        "berserk_timing": 1.0,
-        # Summoner 80110 should produce damage during its buff window.
-        "berserk_no_damage_penalty": 1.0,
+        # Summoner 80110/80121 are treated as one duel-trade button: reward
+        # only real hero fights after use; small poke is neutral.
+        "duel_summoner_timing": 1.0,
         # Workflow-injected action penalty once no-op streak reaches threshold.
         "no_op_streak_penalty": 1.0,
     }
-    REMOVE_FORWARD_AFTER = 1000
+    REMOVE_FORWARD_AFTER = 540
     REWARD_DEBUG_KEY_LIST = [
-        "last_hit_dead_action_count",
-        "last_hit_soldier_dead_count",
-        "last_hit_main_count",
-        "last_hit_enemy_count",
         "cake_high_hp_penalty_count",
         "recover_attempt_count",
         "recover_success_count",
         "recover_interrupted_count",
         "recover_high_hp_penalty_count",
         "enemy_cleansed_us_count",
-        "berserk_total_cast_count",
-        "berserk_no_damage_count",
+        "duel_summoner_cast_count",
+        "duel_summoner_good_count",
+        "duel_summoner_poke_count",
+        "duel_summoner_wasted_count",
+        "duel_summoner_80110_cast_count",
+        "duel_summoner_80121_cast_count",
+        "duel_summoner_80110_good_count",
+        "duel_summoner_80121_good_count",
         "direnjie_skill3_followup_count",
     ]
     ACTION_DEBUG_KEY_LIST = [
@@ -148,6 +154,8 @@ class GameConfig:
     LUBAN_SKILL1_SOLDIER_HIT_WINDOW = 12
     LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
     CLEANSE_WINDOW_FRAMES = 300
+    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 60
+    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END = 420
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW_EARLY = 60
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW = 150
     DI_RENJIE_SKILL3_FOLLOWUP_CAP = 8
@@ -178,6 +186,12 @@ class GameConfig:
     BERSERK_WASTED_REWARD = -0.8
     BERSERK_NO_DAMAGE_WINDOW = 60
     BERSERK_NO_DAMAGE_PENALTY = -1.0
+    DUEL_SUMMONER_WINDOW = 90
+    DUEL_SUMMONER_RANGE = 8500.0
+    DUEL_SUMMONER_DAMAGE_HP_RATIO = 0.20
+    DUEL_SUMMONER_INTERACTION_COUNT = 5
+    DUEL_SUMMONER_GOOD_REWARD = 0.8
+    DUEL_SUMMONER_WASTED_REWARD = -0.4
     NO_OP_STREAK_THRESHOLD = 5
     NO_OP_STREAK_REWARD = -0.1
     OPENING_UNSTUCK_START_FRAME = 180
@@ -222,8 +236,7 @@ class GameConfig:
         "minion_tower_push": 0.0,
         "enemy_dead_enemy_cake": 0.0,
         "win": 0.0,
-        "berserk_timing": 0.0,
-        "berserk_no_damage_penalty": 0.0,
+        "duel_summoner_timing": 0.0,
         "no_op_streak_penalty": 0.0,
     }
     REWARD_WITHOUT_TIME_SCALE = set()

@@ -8,6 +8,7 @@ Training workflow for agent_diy.
 """
 
 import os
+import random
 import time
 
 from agent_diy.conf.conf import Config, GameConfig
@@ -89,12 +90,15 @@ class EpisodeRunner:
         self.episode_cnt = 0
         self.last_report_monitor_time = 0
         self.selected_summoner_skills = [None for _ in range(self.agent_num)]
+        self.selected_matchups = [(None, None) for _ in range(self.agent_num)]
         self.no_op_streaks = [0 for _ in range(self.agent_num)]
 
     def _call_init_config(self, usr_conf, is_eval=False):
         blue_hero_ids, red_hero_ids = EnvConfManager.extract_hero_ids_from_usr_conf(usr_conf)
         camp_keys = ["blue_camp", "red_camp"]
         self.selected_summoner_skills = [None for _ in range(self.agent_num)]
+        self.selected_matchups = [(None, None) for _ in range(self.agent_num)]
+        forced_skills = self._select_episode_summoner_skills(is_eval)
 
         for agent_idx, agent in enumerate(self.agents):
             if agent_idx == 0:
@@ -111,10 +115,33 @@ class EpisodeRunner:
                 "my_heroes": my_hero_ids,
                 "opponent_heroes": opponent_hero_ids,
                 "is_eval": is_eval,
+                "forced_summoner_skill": forced_skills[agent_idx],
             }
             select_skills = agent.init_config(config_data)
             EnvConfManager.inject_select_skills(usr_conf, camp_key, select_skills)
             self.selected_summoner_skills[agent_idx] = self._first_selected_skill(select_skills, my_hero_ids)
+            self.selected_matchups[agent_idx] = (
+                int(my_hero_ids[0]) if my_hero_ids else None,
+                int(opponent_hero_ids[0]) if opponent_hero_ids else None,
+            )
+
+    def _select_episode_summoner_skills(self, is_eval):
+        candidates = list(getattr(GameConfig, "DUEL_SUMMONER_SKILL_IDS", [GameConfig.DEFAULT_SUMMONER_SKILL]))
+        candidates = [int(skill_id) for skill_id in candidates if int(skill_id) in GameConfig.SUMMONER_SKILL_IDS]
+        if not candidates:
+            return [int(GameConfig.DEFAULT_SUMMONER_SKILL) for _ in range(self.agent_num)]
+
+        opponent_agent = str(self.env_conf_manager.get_opponent_agent())
+        if is_eval:
+            combos = [(a, b) for a in candidates for b in candidates]
+            combo = combos[self.episode_cnt % len(combos)]
+            return [int(combo[0]), int(combo[1])]
+
+        if opponent_agent == "selfplay":
+            skill_id = candidates[self.episode_cnt % len(candidates)]
+            return [int(skill_id) for _ in range(self.agent_num)]
+
+        return [int(random.choice(candidates)) for _ in range(self.agent_num)]
 
     def run_episodes(self):
         while True:
@@ -223,8 +250,8 @@ class EpisodeRunner:
 
                     now = time.time()
                     if now - self.last_report_monitor_time >= 60:
-                        monitor_data = {"episode_cnt": self.episode_cnt}
                         if self.monitor:
+                            monitor_data = {}
                             if is_eval:
                                 monitor_data["reward"] = round(reward_sum_list[monitor_side], 2)
                             for reward_name, reward_value in reward_item_sum_list[monitor_side].items():
@@ -234,8 +261,29 @@ class EpisodeRunner:
                             for debug_name, debug_value in action_debug_sum_list[monitor_side].items():
                                 monitor_data[debug_name] = round(debug_value, 4)
                             selected_skill = self.selected_summoner_skills[monitor_side]
-                            for skill_id in GameConfig.SUMMONER_SKILL_MONITOR_IDS:
+                            for skill_id in GameConfig.DUEL_SUMMONER_SKILL_IDS:
                                 monitor_data[f"selected_summoner_{skill_id}"] = 1.0 if selected_skill == skill_id else 0.0
+                            if is_eval:
+                                eval_win, _ = self._infer_terminal_outcome_from_tower_hp(
+                                    observation[str(monitor_side)],
+                                    terminated=terminated,
+                                    truncated=truncated,
+                                )
+                                if eval_win is None:
+                                    eval_win = self._terminal_win_from_env_metrics(
+                                        env_obs,
+                                        observation[str(monitor_side)],
+                                    )
+                                if eval_win is not None:
+                                    my_hero, opponent_hero = self.selected_matchups[monitor_side]
+                                    if (
+                                        my_hero in GameConfig.HERO_IDS
+                                        and opponent_hero in GameConfig.HERO_IDS
+                                        and selected_skill in GameConfig.DUEL_SUMMONER_SKILL_IDS
+                                    ):
+                                        metric = f"eval_m{my_hero}_o{opponent_hero}_s{selected_skill}"
+                                        monitor_data[f"{metric}_count"] = 1.0
+                                        monitor_data[f"{metric}_win"] = 1.0 if eval_win else 0.0
                             monitor_data["rule_override_count"] = float(
                                 getattr(self.agents[monitor_side], "rule_override_count", 0)
                             )

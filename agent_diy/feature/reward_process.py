@@ -143,15 +143,11 @@ class GameRewardManager:
         self._recover_debug = self._empty_recover_debug()
         # Safe last_hit detection (last_hit while inside own tower attack range).
         self._safe_last_hit_count = 0
-        # Berserk timing: wait a short window after 80110 usage and reward only
-        # if it is followed by actual close-range combat.
-        self._pending_berserk_frame = None
-        self._berserk_timing_value = 0.0
-        self._berserk_damage_check_frame = None
-        self._berserk_damage_dealt_in_window = False
-        self._berserk_no_damage_penalty_value = 0.0
-        self._berserk_total_cast_count_value = 0.0
-        self._berserk_no_damage_count_value = 0.0
+        # Duel summoner timing: 80110/80121 share one "commit to a real hero
+        # trade" reward. Light poke is neutral; obvious empty use is penalized.
+        self._pending_duel_summoner = None
+        self._duel_summoner_timing_value = 0.0
+        self._duel_summoner_debug = self._empty_duel_summoner_debug()
         # Low-frequency scenario shaping around minion-tanked tower pushes and
         # enemy-dead cake invades.
         self._minion_tower_push_value = 0.0
@@ -260,14 +256,9 @@ class GameRewardManager:
                         self._safe_last_hit_count = 0
                 else:
                     reward_struct.cur_frame_value = 0.0
-            elif reward_name == "berserk_timing":
+            elif reward_name == "duel_summoner_timing":
                 if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(self._berserk_timing_value)
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            elif reward_name == "berserk_no_damage_penalty":
-                if calc_frame_map is self.m_main_calc_frame_map:
-                    reward_struct.cur_frame_value = float(self._berserk_no_damage_penalty_value)
+                    reward_struct.cur_frame_value = float(self._duel_summoner_timing_value)
                 else:
                     reward_struct.cur_frame_value = 0.0
             elif reward_name == "minion_tower_push":
@@ -325,11 +316,8 @@ class GameRewardManager:
         self._skill_hit_reward_counts = self._compute_skill_hit_events(frame_data, main_hero, enemy_hero)
         self._cake_pickup_count = self._detect_cake_pickup(frame_data, main_hero, enemy_hero)
         self._recover_low_hp_count = self._detect_recover_low_hp(main_hero, frame_no)
-        self._berserk_timing_value = self._detect_berserk_timing(
-            main_hero, enemy_hero, frame_data.get("frame_no", frame_data.get("frameNo", 0))
-        )
-        self._berserk_no_damage_penalty_value = self._detect_berserk_no_damage_penalty(
-            frame_data, main_hero, frame_no
+        self._duel_summoner_timing_value = self._detect_duel_summoner_timing(
+            frame_data, main_hero, enemy_hero, frame_no
         )
         main_tower, enemy_tower = self._find_towers_by_camp(frame_data, main_camp)
         own_soldiers_in_enemy_tower = self._own_soldiers_in_enemy_tower_range(
@@ -381,9 +369,7 @@ class GameRewardManager:
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name == "safe_last_hit":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "berserk_timing":
-                reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
-            elif reward_name == "berserk_no_damage_penalty":
+            elif reward_name == "duel_summoner_timing":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name in SCENARIO_REWARD_KEYS:
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
@@ -419,8 +405,7 @@ class GameRewardManager:
         reward_dict.update(self._cake_debug)
         reward_dict.update(self._recover_debug)
         reward_dict["enemy_cleansed_us_count"] = float(self._cleanse_enemy_count)
-        reward_dict["berserk_total_cast_count"] = float(self._berserk_total_cast_count_value)
-        reward_dict["berserk_no_damage_count"] = float(self._berserk_no_damage_count_value)
+        reward_dict.update(self._duel_summoner_debug)
         reward_dict["direnjie_skill3_followup_count"] = float(self._direnjie_skill3_followup_count_value)
         self.has_last_frame = True
         return reward_dict
@@ -537,6 +522,18 @@ class GameRewardManager:
     def _empty_cake_debug(self):
         return {
             "cake_high_hp_penalty_count": 0,
+        }
+
+    def _empty_duel_summoner_debug(self):
+        return {
+            "duel_summoner_cast_count": 0.0,
+            "duel_summoner_good_count": 0.0,
+            "duel_summoner_poke_count": 0.0,
+            "duel_summoner_wasted_count": 0.0,
+            "duel_summoner_80110_cast_count": 0.0,
+            "duel_summoner_80121_cast_count": 0.0,
+            "duel_summoner_80110_good_count": 0.0,
+            "duel_summoner_80121_good_count": 0.0,
         }
 
     def _actor_runtime(self, actor):
@@ -1096,56 +1093,131 @@ class GameRewardManager:
             count += reward_value
         return count
 
-    def _detect_berserk_timing(self, main_hero, enemy_hero, frame_no):
-        value = 0.0
-        used_berserk = self._used_skill_by_config(main_hero, GameConfig.BERSERK_SKILL_ID)
-        in_engagement = self._is_in_berserk_engagement(main_hero, enemy_hero)
+    def _detect_duel_summoner_timing(self, frame_data, main_hero, enemy_hero, frame_no):
+        self._duel_summoner_debug = self._empty_duel_summoner_debug()
+        frame_no = int(frame_no or 0)
+        used_skill_id = self._used_duel_summoner_skill(main_hero)
+        if used_skill_id is not None:
+            self._start_duel_summoner_check(main_hero, enemy_hero, frame_no, used_skill_id)
 
-        if used_berserk:
-            if in_engagement:
-                self._pending_berserk_frame = None
-                return GameConfig.BERSERK_GOOD_REWARD
-            if self._pending_berserk_frame is None:
-                self._pending_berserk_frame = int(frame_no or 0)
+        if self._pending_duel_summoner is None:
+            return 0.0
 
-        if self._pending_berserk_frame is not None:
-            elapsed = int(frame_no or 0) - self._pending_berserk_frame
-            if elapsed <= GameConfig.BERSERK_LOOKAHEAD_FRAMES and in_engagement:
-                value = GameConfig.BERSERK_GOOD_REWARD
-                self._pending_berserk_frame = None
-            elif elapsed >= GameConfig.BERSERK_LOOKAHEAD_FRAMES:
-                value = GameConfig.BERSERK_WASTED_REWARD
-                self._pending_berserk_frame = None
+        self._update_duel_summoner_check(main_hero, enemy_hero)
+        elapsed = frame_no - int(self._pending_duel_summoner.get("start_frame", frame_no))
+        if elapsed < GameConfig.DUEL_SUMMONER_WINDOW:
+            return 0.0
+
+        value = self._finish_duel_summoner_check()
+        self._pending_duel_summoner = None
         return value
 
+    def _start_duel_summoner_check(self, main_hero, enemy_hero, frame_no, skill_id):
+        dist = self._distance_to_entity(main_hero, enemy_hero)
+        skill_id = int(skill_id)
+        self._pending_duel_summoner = {
+            "skill_id": skill_id,
+            "start_frame": int(frame_no or 0),
+            "main_max_hp": max(float(_max_hp(main_hero) or 0), 1.0),
+            "enemy_max_hp": max(float(_max_hp(enemy_hero) or 0), 1.0),
+            "damage_out": 0.0,
+            "damage_in": 0.0,
+            "interaction_count": 0,
+            "min_distance": dist,
+        }
+        self._duel_summoner_debug["duel_summoner_cast_count"] = 1.0
+        if skill_id == 80110:
+            self._duel_summoner_debug["duel_summoner_80110_cast_count"] = 1.0
+        elif skill_id == 80121:
+            self._duel_summoner_debug["duel_summoner_80121_cast_count"] = 1.0
+
+    def _update_duel_summoner_check(self, main_hero, enemy_hero):
+        pending = self._pending_duel_summoner
+        if pending is None:
+            return
+
+        dist = self._distance_to_entity(main_hero, enemy_hero)
+        if dist is not None:
+            previous = pending.get("min_distance")
+            pending["min_distance"] = dist if previous is None else min(float(previous), dist)
+
+        main_runtime = self._actor_runtime(main_hero)
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        damage_out, events_out = self._hero_damage_from_runtime(enemy_hero, main_runtime)
+        damage_in, events_in = self._hero_damage_from_runtime(main_hero, enemy_runtime)
+        pending["damage_out"] += damage_out
+        pending["damage_in"] += damage_in
+        pending["interaction_count"] += events_out + events_in
+
+    def _finish_duel_summoner_check(self):
+        pending = self._pending_duel_summoner or {}
+        skill_id = int(pending.get("skill_id", 0) or 0)
+        damage_out = float(pending.get("damage_out", 0.0) or 0.0)
+        damage_in = float(pending.get("damage_in", 0.0) or 0.0)
+        total_damage = damage_out + damage_in
+        interaction_count = int(pending.get("interaction_count", 0) or 0)
+        min_distance = pending.get("min_distance")
+        main_max_hp = max(float(pending.get("main_max_hp", 1.0) or 1.0), 1.0)
+        enemy_max_hp = max(float(pending.get("enemy_max_hp", 1.0) or 1.0), 1.0)
+        max_hp = max(main_max_hp, enemy_max_hp)
+
+        in_duel_range = min_distance is not None and float(min_distance) <= GameConfig.DUEL_SUMMONER_RANGE
+        damage_threshold_met = (
+            damage_out >= enemy_max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
+            or damage_in >= main_max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
+            or total_damage >= max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
+        )
+        interaction_threshold_met = interaction_count >= GameConfig.DUEL_SUMMONER_INTERACTION_COUNT
+
+        if in_duel_range and damage_threshold_met and interaction_threshold_met:
+            self._duel_summoner_debug["duel_summoner_good_count"] = 1.0
+            if skill_id == 80110:
+                self._duel_summoner_debug["duel_summoner_80110_good_count"] = 1.0
+            elif skill_id == 80121:
+                self._duel_summoner_debug["duel_summoner_80121_good_count"] = 1.0
+            return GameConfig.DUEL_SUMMONER_GOOD_REWARD
+
+        if interaction_count > 0 or total_damage > 0:
+            self._duel_summoner_debug["duel_summoner_poke_count"] = 1.0
+            return 0.0
+
+        if not in_duel_range:
+            self._duel_summoner_debug["duel_summoner_wasted_count"] = 1.0
+            return GameConfig.DUEL_SUMMONER_WASTED_REWARD
+        return 0.0
+
+    def _hero_damage_from_runtime(self, victim, attacker_runtime):
+        if victim is None or attacker_runtime is None:
+            return 0.0, 0
+        damage = 0.0
+        event_count = 0
+        for hurt in _get_any(victim, ["take_hurt_infos", "takeHurtInfos"], []) or []:
+            atker = _get_any(hurt, ["atker", "attacker"], None)
+            if atker is None or str(atker) != str(attacker_runtime):
+                continue
+            try:
+                hurt_value = float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if hurt_value <= 0:
+                continue
+            damage += hurt_value
+            event_count += 1
+        return damage, event_count
+
+    def _used_duel_summoner_skill(self, hero):
+        if hero is None:
+            return None
+        for skill_id in GameConfig.DUEL_SUMMONER_SKILL_IDS:
+            if self._used_skill_by_config(hero, skill_id):
+                return int(skill_id)
+        return None
+
+    def _detect_berserk_timing(self, main_hero, enemy_hero, frame_no):
+        return 0.0
+
     def _detect_berserk_no_damage_penalty(self, frame_data, main_hero, frame_no):
-        self._berserk_total_cast_count_value = 0.0
-        self._berserk_no_damage_count_value = 0.0
-        used_berserk = self._used_skill_by_config(main_hero, GameConfig.BERSERK_SKILL_ID)
-        frame_no = int(frame_no or 0)
-
-        if used_berserk:
-            self._berserk_damage_check_frame = frame_no
-            self._berserk_damage_dealt_in_window = False
-            self._berserk_total_cast_count_value = 1.0
-
-        if self._berserk_damage_check_frame is None:
-            return 0.0
-
-        if self._has_dealt_damage_to_enemy_units(frame_data, main_hero):
-            self._berserk_damage_dealt_in_window = True
-
-        elapsed = frame_no - int(self._berserk_damage_check_frame)
-        if elapsed < GameConfig.BERSERK_NO_DAMAGE_WINDOW:
-            return 0.0
-
-        penalty = 0.0
-        if not self._berserk_damage_dealt_in_window:
-            penalty = GameConfig.BERSERK_NO_DAMAGE_PENALTY
-            self._berserk_no_damage_count_value = 1.0
-        self._berserk_damage_check_frame = None
-        self._berserk_damage_dealt_in_window = False
-        return penalty
+        return 0.0
 
     def _has_dealt_damage_to_enemy_units(self, frame_data, main_hero):
         if main_hero is None:

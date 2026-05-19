@@ -597,3 +597,38 @@
 - The forward target is built in own-perspective `lane/width` and unprojected through the existing red/blue mirror path, so equivalent blue/red states produce the same own-forward move bins without making red side walk backward.
 - Exported `opening_unstuck_count` through workflow monitor data and the `rule_intervention` panel.
 - Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed; targeted probe confirmed blue and red opening stuck states both emit `[2, 15, 15, 8, 8, 0]` in own-perspective action bins while raw forward targets are mirrored.
+
+### 11.51 2026-05-20 forward reward window
+
+- Changed `REMOVE_FORWARD_AFTER` from `1000` to `540`, so the geometric forward-progress reward is limited to the earlier opening phase.
+
+### 11.52 2026-05-20 Di Renjie skill-2 unmask window
+
+- Changed the 133v133 reverse skill-2 mask so enemy Di Renjie ult cast opens a policy skill-2 window only from frame `+60` through `+420`; before `+60`, after `+420`, or before any tracked enemy ult cast, skill 2 remains masked by the reverse rule.
+- The true ult-hit path is unchanged: `take_hurt_infos` must show the enemy runtime as attacker with `skillSlot == 3`; the hit frame masks policy skill 2 and the next frame hard-overrides to `[5, 15, 15, 15, 15, 2]` if legal and available.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probe covered `last_cast + 59/60/420/421` mask boundaries and enemy-ult-hit detection.
+
+### 11.53 2026-05-20 Di Renjie ult-hit detection hardening
+
+- Hardened the auto-cleanse ult-hit detector to mirror the skill-hit reward evidence stack: `take_hurt_infos/takeHurtInfos` with string-normalized attacker runtime and slot 3, enemy `hit_target_info/hitTargetInfo` targeting our runtime with slot 3, and enemy slot-3 `hitHeroTimes` delta as a final fallback.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probe covered mixed string/int runtime hurt events, `hitTargetInfo`, `hitHeroTimes` increment-only detection, and wrong-slot/wrong-target negatives.
+
+### 11.54 2026-05-20 duel summoner training and reward
+
+- Implemented `docs/相关报告/v3.1召唤师技能训练方案.md`: main training candidates are now `80110` 狂暴 and `80121` 弱化, treated as one hero-trade summoner category.
+- Added workflow skill forcing by episode context: self-play uses the same skill on both sides and alternates through the duel-summoner list; historical/common-ai training samples both sides independently from the same list; train-time eval cycles through all skill-pair combinations.
+- Replaced the old `berserk_timing` / `berserk_no_damage_penalty` reward keys with `duel_summoner_timing`: a cast opens a 90-frame window, rewards `+0.8` only when distance reaches `<=8500`, hero damage reaches the 20% max-HP scale, and at least 5 hero damage interactions occur; light poke is neutral and obvious far empty use is `-0.4`.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\conf\monitor_builder.py agent_diy\feature\reward_process.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed; targeted probes covered self-play same-skill alternation, history/eval skill selection, real duel reward `+0.8`, poke reward `0`, and weak/far empty use `-0.4`.
+
+### 11.55 2026-05-20 opponent pool update
+
+- Updated this training round to `mixed` opponents with only `selfplay` and model `271476`, weighted `0.55 / 0.45`.
+- Updated eval opponents to `common_ai`, `271476`, and `267822`; updated `kaiwu.json` model pool to `[271476, 267822]`.
+- Replaced coarse eval summoner monitors with matchup/skill monitors `eval_m{my}_o{opp}_s{skill}_{count,win}` covering 112/133 matchups and 80110/80121; each win/count ratio is the train-time eval win rate for that matchup and skill.
+- Added `SUMMONER_SKILL_MATCHUP_WINRATE` and made formal eval/exam `init_config()` select the higher-winrate duel summoner for `(my_hero, opponent_hero)`, falling back to default 80110 on ties or missing data.
+
+### 11.56 2026-05-20 monitor panel cleanup
+
+- Reorganized `agent_diy/conf/monitor_builder.py` into diagnostic panels: PPO health, match result, objective/economy, combat reward, skill-hit reward, action buttons, skill usage, target selection, rule intervention, summoner/recover, and per-matchup eval panels.
+- Removed non-displayed monitor-only values from workflow aggregation: episode count, broad summoner-skill one-hot output, and last-hit debug counters that are not used by reward computation, model inputs, or training samples.
+- Validation: `python -m py_compile agent_diy\conf\monitor_builder.py agent_diy\conf\conf.py agent_diy\workflow\train_workflow.py agent_diy\algorithm\algorithm.py` passed; `Config.validate()` passed; a stubbed `MonitorConfigBuilder` probe confirmed the panel config builds with 14 panels and 101 displayed metrics, with retained producer metrics covered by the display set.

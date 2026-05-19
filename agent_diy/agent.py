@@ -149,6 +149,7 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._prev_enemy_slot3_hit_hero_times = None
 
         super().__init__(agent_type, device, logger, monitor)
 
@@ -162,9 +163,12 @@ class Agent(BaseAgent):
         opponent_heroes = config_data.get("opponent_heroes", [])
         opponent_hero = opponent_heroes[0] if opponent_heroes else None
         is_eval = bool(config_data.get("is_eval", False))
+        forced_skill = config_data.get("forced_summoner_skill", None)
         select_skills = {}
         for hero_id in my_heroes:
-            if is_eval:
+            if forced_skill is not None:
+                select_skills[hero_id] = int(forced_skill)
+            elif is_eval:
                 select_skills[hero_id] = self._default_summoner_skill(hero_id, opponent_hero)
             else:
                 select_skills[hero_id] = self._select_train_summoner_skill(hero_id, opponent_hero)
@@ -173,7 +177,32 @@ class Agent(BaseAgent):
     def _default_summoner_skill(self, my_hero, opponent_hero):
         # Eval / match always uses the configured default (currently 80110 狂暴).
         # Training cycle path also falls back here when candidates are exhausted.
-        return GameConfig.DEFAULT_SUMMONER_SKILL
+        return self._matchup_summoner_skill(my_hero, opponent_hero)
+
+    def _matchup_summoner_skill(self, my_hero, opponent_hero):
+        candidates = list(getattr(GameConfig, "DUEL_SUMMONER_SKILL_IDS", []))
+        candidates = [int(skill_id) for skill_id in candidates if int(skill_id) in GameConfig.SUMMONER_SKILL_IDS]
+        if not candidates:
+            return GameConfig.DEFAULT_SUMMONER_SKILL
+
+        try:
+            matchup = (int(my_hero), int(opponent_hero or 0))
+        except (TypeError, ValueError):
+            return GameConfig.DEFAULT_SUMMONER_SKILL
+
+        winrate_table = getattr(GameConfig, "SUMMONER_SKILL_MATCHUP_WINRATE", {})
+        skill_scores = winrate_table.get(matchup, {})
+        if not skill_scores:
+            return GameConfig.DEFAULT_SUMMONER_SKILL
+
+        best_skill = int(GameConfig.DEFAULT_SUMMONER_SKILL)
+        best_score = float(skill_scores.get(best_skill, 0.0) or 0.0)
+        for skill_id in candidates:
+            score = float(skill_scores.get(skill_id, 0.0) or 0.0)
+            if score > best_score:
+                best_skill = int(skill_id)
+                best_score = score
+        return best_skill
 
     def _select_train_summoner_skill(self, my_hero, opponent_hero):
         default_skill = self._default_summoner_skill(my_hero, opponent_hero)
@@ -245,6 +274,7 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._prev_enemy_slot3_hit_hero_times = None
 
     def _model_inference(self, list_obs_data):
         feature = [obs_data.feature for obs_data in list_obs_data]
@@ -575,13 +605,42 @@ class Agent(BaseAgent):
         return masked_observation
 
     def _was_hit_by_enemy_ult(self, main_hero, enemy_hero):
+        main_runtime = self._actor_runtime(main_hero)
         enemy_runtime = self._actor_runtime(enemy_hero)
-        for hurt in main_hero.get("take_hurt_infos", []) or []:
-            atker = hurt.get("atker") or hurt.get("attacker")
-            slot = self._slot_idx(hurt.get("skillSlot")) if "skillSlot" in hurt else self._slot_idx(hurt.get("skill_slot"))
-            if atker == enemy_runtime and slot == 3:
+        current_hit_times = self._slot_hit_hero_times(enemy_hero, 3)
+        previous_hit_times = self._prev_enemy_slot3_hit_hero_times
+        for hurt in self._get_any(main_hero or {}, ["take_hurt_infos", "takeHurtInfos"], []) or []:
+            if not isinstance(hurt, dict):
+                continue
+            atker = self._get_any(hurt, ["atker", "attacker"], None)
+            slot = self._slot_idx(self._get_any(hurt, ["skillSlot", "skill_slot"], -1))
+            if atker is not None and enemy_runtime is not None and str(atker) == str(enemy_runtime) and slot == 3:
+                self._prev_enemy_slot3_hit_hero_times = current_hit_times
                 return True
-        return False
+        if main_runtime is not None:
+            for hit in self._get_any(enemy_hero or {}, ["hit_target_info", "hitTargetInfo"], []) or []:
+                if not isinstance(hit, dict):
+                    continue
+                target_runtime = self._get_any(hit, ["hit_target", "hitTarget"], None)
+                slot = self._slot_idx(self._get_any(hit, ["slot_type", "slotType"], -1))
+                if target_runtime is not None and str(target_runtime) == str(main_runtime) and slot == 3:
+                    self._prev_enemy_slot3_hit_hero_times = current_hit_times
+                    return True
+        self._prev_enemy_slot3_hit_hero_times = current_hit_times
+        if current_hit_times is None or previous_hit_times is None:
+            return False
+        return current_hit_times > previous_hit_times
+
+    def _slot_hit_hero_times(self, hero, target_slot):
+        values = []
+        for slot in self._slot_states(hero):
+            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != target_slot:
+                continue
+            try:
+                values.append(float(self._get_any(slot, ["hitHeroTimes", "hit_hero_times"], 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return max(values) if values else None
 
     def _track_enemy_ult_cast(self, observation):
         frame_state = observation.get("frame_state", {}) or {}
@@ -633,7 +692,12 @@ class Agent(BaseAgent):
             return False
         last_cast = self._enemy_ult_cast_frame
         frame_no = self._frame_no(frame_state)
-        return last_cast is None or frame_no - int(last_cast) > GameConfig.CLEANSE_WINDOW_FRAMES
+        if last_cast is None:
+            return True
+        elapsed = frame_no - int(last_cast)
+        unmask_start = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START)
+        unmask_end = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END)
+        return elapsed < unmask_start or elapsed > unmask_end
 
     def _track_skill2_action_stats(self, observation, action):
         action = self._normalize_action(action)

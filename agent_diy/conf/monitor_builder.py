@@ -21,52 +21,108 @@ def build_monitor():
     monitor = MonitorConfigBuilder()
 
     config = monitor.title("hok1v1-diy").add_group(
-        group_name="algorithm",
-        group_name_en="algorithm",
+        group_name="diagnostics",
+        group_name_en="diagnostics",
     )
 
-    config = (
-        config.add_panel(name="reward", name_en="reward", type="line")
-        .add_metric(metrics_name="reward", expr="round(avg(reward{}), 0.01)")
-        .end_panel()
-    )
+    config = config.add_panel(name="ppo_health", name_en="ppo_health", type="line")
+    for metric_name, precision in (
+        ("total_loss", "0.01"),
+        ("value_loss", "0.01"),
+        ("policy_loss", "0.01"),
+        ("entropy_loss", "0.01"),
+        ("mean_ratio", "0.0001"),
+        ("approx_kl", "0.000001"),
+        ("clip_fraction", "0.0001"),
+    ):
+        config = _add_metric(config, metric_name, precision)
+    config = config.end_panel()
 
-    config = (
-        config.add_panel(name="total_loss", name_en="total_loss", type="line")
-        .add_metric(metrics_name="total_loss", expr="round(avg(total_loss{}), 0.01)")
-        .end_panel()
-    )
+    config = config.add_panel(name="match_result", name_en="match_result", type="line")
+    for metric_name, precision in (
+        ("reward", "0.01"),
+        ("reward_win", "0.0001"),
+    ):
+        config = _add_metric(config, metric_name, precision)
+    config = config.end_panel()
 
-    config = (
-        config.add_panel(name="value_loss", name_en="value_loss", type="line")
-        .add_metric(metrics_name="value_loss", expr="round(avg(value_loss{}), 0.01)")
-        .end_panel()
-    )
-
-    config = (
-        config.add_panel(name="ppo_kl", name_en="ppo_kl", type="line")
-        .add_metric(metrics_name="approx_kl", expr="round(avg(approx_kl{}), 0.000001)")
-        .end_panel()
-    )
-
-    config = (
-        config.add_panel(name="ppo_clip", name_en="ppo_clip", type="line")
-        .add_metric(metrics_name="clip_fraction", expr="round(avg(clip_fraction{}), 0.0001)")
-        .end_panel()
-    )
-
-    config = config.add_panel(name="objective_reward", name_en="objective_reward", type="line")
-    for metric_name in ("reward_tower_hp_point", "reward_money"):
+    config = config.add_panel(name="objective_economy", name_en="objective_economy", type="line")
+    for metric_name in (
+        "reward_tower_hp_point",
+        "reward_money",
+        "reward_exp",
+        "reward_last_hit",
+        "reward_safe_last_hit",
+        "reward_minion_tower_push",
+        "reward_enemy_dead_enemy_cake",
+        "reward_forward",
+    ):
         config = _add_metric(config, metric_name, "0.0001")
     config = config.end_panel()
 
-    config = config.add_panel(name="target_focus", name_en="target_focus", type="line")
+    config = config.add_panel(name="combat_reward", name_en="combat_reward", type="line")
     for metric_name in (
+        "reward_hp_point",
+        "reward_ep_rate",
+        "reward_kill",
+        "reward_death",
+        "reward_cleanse_success",
+        "reward_duel_summoner_timing",
+        "reward_no_op_streak_penalty",
+    ):
+        config = _add_metric(config, metric_name, "0.0001")
+    config = config.end_panel()
+
+    config = config.add_panel(name="skill_hit_reward", name_en="skill_hit_reward", type="line")
+    for metric_name in (
+        "reward_luban_skill1_hit_enemy_soldier",
+        "reward_luban_skill1_hit_enemy_hero",
+        "reward_luban_skill2_hit_enemy_hero",
+        "reward_luban_skill3_hit_enemy_hero",
+        "reward_direnjie_skill1_hit_enemy_hero",
+        "reward_direnjie_skill3_hit_enemy_hero",
+        "reward_direnjie_skill3_followup_damage",
+        "direnjie_skill3_followup_count",
+    ):
+        config = _add_metric(config, metric_name, "0.0001")
+    config = config.end_panel()
+
+    config = config.add_panel(name="action_buttons", name_en="action_buttons", type="line")
+    for metric_name in (
+        "action_noop_count",
+        "action_move_count",
+        "action_attack_count",
+        "action_skill_count",
+        "action_recover_count",
+        "action_summoner_count",
+        "action_recall_count",
+        "action_equipment_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="skill_usage", name_en="skill_usage", type="line")
+    for metric_name in (
+        "skill_1_used_count",
+        "skill_2_used_count",
+        "skill_3_used_count",
+        "recover_used_count",
+        "summoner_skill_used_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="target_selection", name_en="target_selection", type="line")
+    for metric_name in (
+        "target_none_count",
+        "target_enemy_hero_count",
+        "target_self_hero_count",
+        "target_enemy_soldier_count",
+        "target_enemy_tower_count",
+        "target_monster_count",
         "attack_target_enemy_hero_count",
         "attack_target_enemy_soldier_count",
         "skill_target_enemy_hero_count",
-        "target_enemy_tower_count",
-        "target_monster_count",
     ):
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
@@ -90,54 +146,44 @@ def build_monitor():
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
 
-    config = config.add_panel(name="new_reward_signals", name_en="new_reward_signals", type="line")
-    for metric_name in (
-        "reward_cleanse_success",
-        "reward_cake_pickup",
-        "reward_recover_skill_low_hp",
-        "reward_safe_last_hit",
-        "reward_minion_tower_push",
-        "reward_enemy_dead_enemy_cake",
-        "reward_win",
-        "reward_berserk_timing",
-        "reward_berserk_no_damage_penalty",
-        "reward_no_op_streak_penalty",
+    config = config.add_panel(name="summoner_recover", name_en="summoner_recover", type="line")
+    for metric_name, precision in (
+        ("selected_summoner_80110", "0.01"),
+        ("selected_summoner_80121", "0.01"),
+        ("duel_summoner_cast_count", "0.01"),
+        ("duel_summoner_good_count", "0.01"),
+        ("duel_summoner_poke_count", "0.01"),
+        ("duel_summoner_wasted_count", "0.01"),
+        ("duel_summoner_80110_cast_count", "0.01"),
+        ("duel_summoner_80121_cast_count", "0.01"),
+        ("duel_summoner_80110_good_count", "0.01"),
+        ("duel_summoner_80121_good_count", "0.01"),
+        ("reward_cake_pickup", "0.0001"),
+        ("reward_recover_skill_low_hp", "0.0001"),
+        ("cake_high_hp_penalty_count", "0.01"),
+        ("recover_attempt_count", "0.01"),
+        ("recover_success_count", "0.01"),
+        ("recover_interrupted_count", "0.01"),
+        ("recover_high_hp_penalty_count", "0.01"),
+        ("enemy_cleansed_us_count", "0.01"),
     ):
-        config = _add_metric(config, metric_name, "0.0001")
+        config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
 
-    config = config.add_panel(name="cleanse_berserk", name_en="cleanse_berserk", type="line")
-    for metric_name in (
-        "enemy_cleansed_us_count",
-        "berserk_total_cast_count",
-        "berserk_no_damage_count",
-    ):
-        config = _add_metric(config, metric_name, "0.01")
-    config = config.end_panel()
-
-    config = config.add_panel(name="recover_debug", name_en="recover_debug", type="line")
-    for metric_name in (
-        "cake_high_hp_penalty_count",
-        "recover_attempt_count",
-        "recover_success_count",
-        "recover_interrupted_count",
-        "recover_high_hp_penalty_count",
-    ):
-        config = _add_metric(config, metric_name, "0.01")
-    config = config.end_panel()
-
-    config = config.add_panel(name="skill_hit_detail", name_en="skill_hit_detail", type="line")
-    for metric_name in (
-        "reward_luban_skill1_hit_enemy_soldier",
-        "reward_luban_skill1_hit_enemy_hero",
-        "reward_luban_skill2_hit_enemy_hero",
-        "reward_luban_skill3_hit_enemy_hero",
-        "reward_direnjie_skill1_hit_enemy_hero",
-        "reward_direnjie_skill3_hit_enemy_hero",
-        "reward_direnjie_skill3_followup_damage",
-        "direnjie_skill3_followup_count",
-    ):
-        config = _add_metric(config, metric_name, "0.0001")
-    config = config.end_panel()
+    for my_hero in (112, 133):
+        for opponent_hero in (112, 133):
+            config = config.add_panel(
+                name=f"eval_{my_hero}v{opponent_hero}",
+                name_en=f"eval_{my_hero}v{opponent_hero}",
+                type="line",
+            )
+            for skill_id in (80110, 80121):
+                for suffix in ("count", "win"):
+                    config = _add_metric(
+                        config,
+                        f"eval_m{my_hero}_o{opponent_hero}_s{skill_id}_{suffix}",
+                        "0.01",
+                    )
+            config = config.end_panel()
 
     return config.end_group().build()
