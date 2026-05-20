@@ -103,7 +103,7 @@ class GameConfig:
         # Workflow-injected action penalty once no-op streak reaches threshold.
         "no_op_streak_penalty": 1.0,
     }
-    REMOVE_FORWARD_AFTER = 540
+    REMOVE_FORWARD_AFTER = 500
     REWARD_DEBUG_KEY_LIST = [
         "cake_high_hp_penalty_count",
         "recover_attempt_count",
@@ -113,6 +113,8 @@ class GameConfig:
         "enemy_cleansed_us_count",
         "duel_summoner_cast_count",
         "duel_summoner_good_count",
+        "duel_summoner_mid_count",
+        "duel_summoner_touch_count",
         "duel_summoner_poke_count",
         "duel_summoner_wasted_count",
         "duel_summoner_80110_cast_count",
@@ -154,7 +156,7 @@ class GameConfig:
     LUBAN_SKILL1_SOLDIER_HIT_WINDOW = 12
     LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
     CLEANSE_WINDOW_FRAMES = 300
-    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 60
+    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 12
     DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END = 420
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW_EARLY = 60
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW = 150
@@ -188,10 +190,14 @@ class GameConfig:
     BERSERK_NO_DAMAGE_PENALTY = -1.0
     DUEL_SUMMONER_WINDOW = 90
     DUEL_SUMMONER_RANGE = 8500.0
-    DUEL_SUMMONER_DAMAGE_HP_RATIO = 0.20
-    DUEL_SUMMONER_INTERACTION_COUNT = 5
+    DUEL_SUMMONER_GOOD_DAMAGE_HP_RATIO = 0.20
+    DUEL_SUMMONER_GOOD_INTERACTION_COUNT = 5
+    DUEL_SUMMONER_MID_DAMAGE_HP_RATIO = 0.12
+    DUEL_SUMMONER_MID_INTERACTION_COUNT = 3
     DUEL_SUMMONER_GOOD_REWARD = 0.8
-    DUEL_SUMMONER_WASTED_REWARD = -0.4
+    DUEL_SUMMONER_MID_REWARD = 0.3
+    DUEL_SUMMONER_TOUCH_REWARD = 0.05
+    DUEL_SUMMONER_WASTED_REWARD = -0.3
     NO_OP_STREAK_THRESHOLD = 5
     NO_OP_STREAK_REWARD = -0.1
     OPENING_UNSTUCK_START_FRAME = 180

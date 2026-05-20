@@ -149,6 +149,7 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
         super().__init__(agent_type, device, logger, monitor)
@@ -274,6 +275,7 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
     def _model_inference(self, list_obs_data):
@@ -484,12 +486,39 @@ class Agent(BaseAgent):
                     self.cleanse_override_count += 1
                     return cleanse_action
 
+        fallback_action = self._maybe_force_cleanse_after_enemy_ult(observation, main_hero, frame_no)
+        if fallback_action is not None:
+            return fallback_action
+
         if not self._was_hit_by_enemy_ult(main_hero, enemy_hero):
             return action
 
         if self._pending_cleanse_frame is None:
             self._pending_cleanse_frame = frame_no + 1
         return action
+
+    def _maybe_force_cleanse_after_enemy_ult(self, observation, main_hero, frame_no):
+        last_cast = self._enemy_ult_cast_frame
+        if last_cast is None:
+            return None
+        if self._fallback_cleanse_ult_cast_frame == last_cast:
+            return None
+        elapsed = int(frame_no or 0) - int(last_cast)
+        trigger_frame = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START)
+        unmask_end = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END)
+        if elapsed < trigger_frame or elapsed > unmask_end:
+            return None
+        self._fallback_cleanse_ult_cast_frame = last_cast
+        if not self._is_skill2_available(main_hero):
+            return None
+        cleanse_action = self._legalized_rule_action(observation, [5, 15, 15, 15, 15, 2])
+        if cleanse_action is None:
+            return None
+        self.rule_override_active = True
+        self.cleanse_override_active = True
+        self.rule_override_count += 1
+        self.cleanse_override_count += 1
+        return cleanse_action
 
     def _maybe_opening_unstuck(self, observation, action):
         frame_state = observation.get("frame_state", {}) or {}
@@ -819,6 +848,8 @@ class Agent(BaseAgent):
         # Force walking back to base when low HP and safe, then return to the
         # first-tower area after healing. The task has no usable recall button.
         self.recall_override_active = False
+        if self.cleanse_override_active:
+            return action
 
         frame_state = observation.get("frame_state", {}) or {}
         frame_no = frame_state.get("frame_no", frame_state.get("frameNo", 0)) or 0

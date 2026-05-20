@@ -528,6 +528,8 @@ class GameRewardManager:
         return {
             "duel_summoner_cast_count": 0.0,
             "duel_summoner_good_count": 0.0,
+            "duel_summoner_mid_count": 0.0,
+            "duel_summoner_touch_count": 0.0,
             "duel_summoner_poke_count": 0.0,
             "duel_summoner_wasted_count": 0.0,
             "duel_summoner_80110_cast_count": 0.0,
@@ -1162,20 +1164,34 @@ class GameRewardManager:
         max_hp = max(main_max_hp, enemy_max_hp)
 
         in_duel_range = min_distance is not None and float(min_distance) <= GameConfig.DUEL_SUMMONER_RANGE
-        damage_threshold_met = (
-            damage_out >= enemy_max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
-            or damage_in >= main_max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
-            or total_damage >= max_hp * GameConfig.DUEL_SUMMONER_DAMAGE_HP_RATIO
+        good_damage_met = (
+            damage_out >= enemy_max_hp * GameConfig.DUEL_SUMMONER_GOOD_DAMAGE_HP_RATIO
+            or damage_in >= main_max_hp * GameConfig.DUEL_SUMMONER_GOOD_DAMAGE_HP_RATIO
+            or total_damage >= max_hp * GameConfig.DUEL_SUMMONER_GOOD_DAMAGE_HP_RATIO
         )
-        interaction_threshold_met = interaction_count >= GameConfig.DUEL_SUMMONER_INTERACTION_COUNT
+        good_interaction_met = interaction_count >= GameConfig.DUEL_SUMMONER_GOOD_INTERACTION_COUNT
 
-        if in_duel_range and damage_threshold_met and interaction_threshold_met:
+        if in_duel_range and good_damage_met and good_interaction_met:
             self._duel_summoner_debug["duel_summoner_good_count"] = 1.0
             if skill_id == 80110:
                 self._duel_summoner_debug["duel_summoner_80110_good_count"] = 1.0
             elif skill_id == 80121:
                 self._duel_summoner_debug["duel_summoner_80121_good_count"] = 1.0
             return GameConfig.DUEL_SUMMONER_GOOD_REWARD
+
+        mid_damage_met = (
+            damage_out >= enemy_max_hp * GameConfig.DUEL_SUMMONER_MID_DAMAGE_HP_RATIO
+            or damage_in >= main_max_hp * GameConfig.DUEL_SUMMONER_MID_DAMAGE_HP_RATIO
+            or total_damage >= max_hp * GameConfig.DUEL_SUMMONER_MID_DAMAGE_HP_RATIO
+        )
+        mid_interaction_met = interaction_count >= GameConfig.DUEL_SUMMONER_MID_INTERACTION_COUNT
+        if in_duel_range and (mid_damage_met or mid_interaction_met):
+            self._duel_summoner_debug["duel_summoner_mid_count"] = 1.0
+            return GameConfig.DUEL_SUMMONER_MID_REWARD
+
+        if in_duel_range and (interaction_count > 0 or total_damage > 0):
+            self._duel_summoner_debug["duel_summoner_touch_count"] = 1.0
+            return GameConfig.DUEL_SUMMONER_TOUCH_REWARD
 
         if interaction_count > 0 or total_damage > 0:
             self._duel_summoner_debug["duel_summoner_poke_count"] = 1.0

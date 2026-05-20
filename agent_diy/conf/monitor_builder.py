@@ -152,6 +152,8 @@ def build_monitor():
         ("selected_summoner_80121", "0.01"),
         ("duel_summoner_cast_count", "0.01"),
         ("duel_summoner_good_count", "0.01"),
+        ("duel_summoner_mid_count", "0.01"),
+        ("duel_summoner_touch_count", "0.01"),
         ("duel_summoner_poke_count", "0.01"),
         ("duel_summoner_wasted_count", "0.01"),
         ("duel_summoner_80110_cast_count", "0.01"),

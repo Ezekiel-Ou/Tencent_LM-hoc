@@ -600,7 +600,7 @@
 
 ### 11.51 2026-05-20 forward reward window
 
-- Changed `REMOVE_FORWARD_AFTER` from `1000` to `540`, so the geometric forward-progress reward is limited to the earlier opening phase.
+- Changed `REMOVE_FORWARD_AFTER` from `1000` to `500`, so the geometric forward-progress reward is limited to the earlier opening phase.
 
 ### 11.52 2026-05-20 Di Renjie skill-2 unmask window
 
@@ -623,6 +623,7 @@
 ### 11.55 2026-05-20 opponent pool update
 
 - Updated this training round to `mixed` opponents with only `selfplay` and model `271476`, weighted `0.55 / 0.45`.
+
 - Updated eval opponents to `common_ai`, `271476`, and `267822`; updated `kaiwu.json` model pool to `[271476, 267822]`.
 - Replaced coarse eval summoner monitors with matchup/skill monitors `eval_m{my}_o{opp}_s{skill}_{count,win}` covering 112/133 matchups and 80110/80121; each win/count ratio is the train-time eval win rate for that matchup and skill.
 - Added `SUMMONER_SKILL_MATCHUP_WINRATE` and made formal eval/exam `init_config()` select the higher-winrate duel summoner for `(my_hero, opponent_hero)`, falling back to default 80110 on ties or missing data.
@@ -632,3 +633,10 @@
 - Reorganized `agent_diy/conf/monitor_builder.py` into diagnostic panels: PPO health, match result, objective/economy, combat reward, skill-hit reward, action buttons, skill usage, target selection, rule intervention, summoner/recover, and per-matchup eval panels.
 - Removed non-displayed monitor-only values from workflow aggregation: episode count, broad summoner-skill one-hot output, and last-hit debug counters that are not used by reward computation, model inputs, or training samples.
 - Validation: `python -m py_compile agent_diy\conf\monitor_builder.py agent_diy\conf\conf.py agent_diy\workflow\train_workflow.py agent_diy\algorithm\algorithm.py` passed; `Config.validate()` passed; a stubbed `MonitorConfigBuilder` probe confirmed the panel config builds with 14 panels and 101 displayed metrics, with retained producer metrics covered by the display set.
+
+### 11.57 2026-05-20 Di Renjie scheduled cleanse fallback
+
+- Changed the 133v133 skill-2 unmask window to enemy ult cast frame `+12` through `+420`, replacing the previous `+60` start.
+- Added a one-shot scheduled cleanse fallback: for each tracked enemy Di Renjie ult cast, the first observed frame at or after `+12` attempts to hard-overwrite skill 2 if it is available and legal. If skill 2 is unavailable at that first eligible frame, the fallback is consumed for that ult and the policy can still use skill 2 naturally during the unmasked window.
+- Guarded force-home from overriding a cleanse hard action on the same frame.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probe covered `+11/+12/+420/+421` mask boundaries, one-shot `+12` fallback success, unavailable-at-`+12` no-retry behavior, and hardened ult-hit detection.
