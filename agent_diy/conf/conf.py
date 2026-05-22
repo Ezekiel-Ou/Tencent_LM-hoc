@@ -36,10 +36,16 @@ class GameConfig:
         133: DUEL_SUMMONER_SKILL_IDS.copy(),
     }
     SUMMONER_SKILL_MATCHUP_WINRATE = {
-        (112, 112): {80110: 0.0, 80121: 0.0},
-        (112, 133): {80110: 0.0, 80121: 0.0},
-        (133, 112): {80110: 0.0, 80121: 0.0},
-        (133, 133): {80110: 0.0, 80121: 0.0},
+        (112, 112): {80110: 0.90, 80121: 0.95},
+        (112, 133): {80110: 0.95, 80121: 1.00},
+        (133, 112): {80110: 0.32, 80121: 0.18},
+        (133, 133): {80110: 0.85, 80121: 0.90},
+    }
+    LINEUP_SAMPLING_WEIGHTS = {
+        (112, 112): 1,
+        (112, 133): 1,
+        (133, 112): 2,
+        (133, 133): 1,
     }
     LEVEL_MAX_EXP = {
         1: 160,
@@ -94,6 +100,10 @@ class GameConfig:
         # Before cannon wave, enemy-dead + minion-tanking context can justify
         # invading the enemy health cake. This is intentionally small.
         "enemy_dead_enemy_cake": 1.0,
+        # Late-game defense pressure: enemy minions near or inside our tower
+        # range are penalized before tower HP damage becomes the only signal.
+        "enemy_minion_tower_front": 1.0,
+        "enemy_minion_under_own_tower": 1.0,
         # Terminal sparse reward injected at game over. Weight stays 1.0; the
         # event value is +/- TERMINAL_WIN_REWARD.
         "win": 1.0,
@@ -122,6 +132,9 @@ class GameConfig:
         "duel_summoner_80110_good_count",
         "duel_summoner_80121_good_count",
         "direnjie_skill3_followup_count",
+        "enemy_minion_tower_front_count",
+        "enemy_minion_under_own_tower_count",
+        "enemy_minion_defense_multiplier",
     ]
     ACTION_DEBUG_KEY_LIST = [
         "action_noop_count",
@@ -172,10 +185,23 @@ class GameConfig:
     TOWER_PUSH_APPROACH_DELTA = 120.0
     ENEMY_DEAD_CAKE_MIN_SOLDIERS = 2
     ENEMY_DEAD_CAKE_EVAL_INTERVAL = 10
+    ENEMY_DEAD_CAKE_ZONE_REWARD = 0.02
     ENEMY_DEAD_CAKE_APPROACH_REWARD = 0.04
     ENEMY_DEAD_CAKE_NEAR_REWARD = 0.06
     ENEMY_DEAD_CAKE_APPROACH_DELTA = 120.0
-    ENEMY_DEAD_CAKE_NEAR_RANGE = 1500.0
+    ENEMY_DEAD_CAKE_ZONE_RANGE = 10000.0
+    ENEMY_DEAD_CAKE_NEAR_RANGE = 3500.0
+    ENEMY_MINION_DEFENSE_EVAL_INTERVAL = 10
+    ENEMY_MINION_TOWER_FRONT_RANGE_MULTIPLIER = 1.2
+    ENEMY_MINION_TOWER_FRONT_REWARD = -0.02
+    ENEMY_MINION_TOWER_FRONT_CAP = -0.06
+    ENEMY_MINION_UNDER_OWN_TOWER_REWARD = -0.04
+    ENEMY_MINION_UNDER_OWN_TOWER_CAP = -0.12
+    ENEMY_MINION_DEFENSE_COUNT_CAP = 3
+    ENEMY_MINION_DEFENSE_TOWER_HP_MID = 0.50
+    ENEMY_MINION_DEFENSE_TOWER_HP_LOW = 0.25
+    ENEMY_MINION_DEFENSE_MID_MULTIPLIER = 1.5
+    ENEMY_MINION_DEFENSE_LOW_MULTIPLIER = 2.0
     CANNON_FRAME = 6254
     DEATH_MULTIPLIER_BEFORE_CANNON = 0.7
     DEATH_MULTIPLIER_AFTER_CANNON = 1.3
@@ -205,20 +231,22 @@ class GameConfig:
     OPENING_UNSTUCK_MIN_MOVE = 30.0
     OPENING_UNSTUCK_COOLDOWN_FRAMES = 5
     OPENING_UNSTUCK_FORWARD_DELTA = 2000.0
-    FORCE_HOME_PHASE_END_FRAME = 6000
+    FORCE_HOME_DISABLE_MONEY_TOTAL = 2900
     FORCE_HOME_HP_TRIGGER_PRE_CANNON = 0.20
     FORCE_HOME_HP_TRIGGER = 0.20
-    FORCE_HOME_HP_RECOVERED = 0.80
+    FORCE_HOME_HP_RECOVERED = 0.70
+    FORCE_HOME_POST_KILL_HP_TRIGGER = 0.40
+    FORCE_HOME_POST_KILL_WINDOW_FRAMES = 900
     FORCE_HOME_TOWER_HP_MIN = 0.40
     FORCE_HOME_ENEMY_SAFE_RANGE = 10000.0
     FORCE_HOME_TOWER_AREA_ENEMY_MINIONS_MAX = 0
-    FORCE_HOME_ENEMY_DEAD_LANE_LO = -13000.0
-    FORCE_HOME_ENEMY_DEAD_LANE_HI = 13000.0
-    FORCE_HOME_DEEP_LANE = -20000.0
+    FORCE_HOME_ENEMY_DEAD_LANE_LO = -18384.78
+    FORCE_HOME_ENEMY_DEAD_LANE_HI = 18384.78
+    FORCE_HOME_DEEP_LANE = -30000.0
     FORCE_HOME_RECOVER_COOLDOWN_FRAMES = 120
     CAKE_PICKUP_PROXIMITY = 1500.0
-    FORCE_HOME_RETURN_EXIT_LANE = -15000.0
-    FORCE_HOME_PATH_VALID_EXIT_LANE = -13000.0
+    FORCE_HOME_RETURN_EXIT_LANE = -18000.0
+    FORCE_HOME_PATH_VALID_EXIT_LANE = -18000.0
     FORCE_HOME_PATH_RECORD_FRAMES = 600
     FORCE_HOME_PATH_MAX_POINTS = 24
     FORCE_HOME_PATH_MIN_POINTS = 5
@@ -241,6 +269,8 @@ class GameConfig:
         "cleanse_success": 0.0,
         "minion_tower_push": 0.0,
         "enemy_dead_enemy_cake": 0.0,
+        "enemy_minion_tower_front": 0.0,
+        "enemy_minion_under_own_tower": 0.0,
         "win": 0.0,
         "duel_summoner_timing": 0.0,
         "no_op_streak_penalty": 0.0,
@@ -255,10 +285,10 @@ class Args:
     RAW_COORD_ABS_LIMIT = 60000
     GLOBAL_LANE_HALF = 45000
     GLOBAL_WIDTH_HALF = 7000
-    CENTER_LANE_HALF = 15000
-    CENTER_WIDTH_HALF = 10000
-    CENTER_LANE_UNIT = 500
-    CENTER_WIDTH_UNIT = 250
+    CENTER_LANE_HALF = 22000
+    CENTER_WIDTH_HALF = 14000
+    CENTER_LANE_UNIT = 720.0
+    CENTER_WIDTH_UNIT = 350.0
     GLOBAL_LANE_UNIT = 5000
     GLOBAL_WIDTH_UNIT = 3500
 
@@ -310,12 +340,29 @@ class Args:
     CAKE_RESPAWN_SECONDS = 75
     FRAME_MAX_FALLBACK = 20000
 
-    SELF_BASE_ANCHOR = (-40000.0, 0.0)
-    ENEMY_BASE_ANCHOR = (40000.0, 0.0)
-    SELF_TOWER_ANCHOR = (-13000.0, 0.0)
-    ENEMY_TOWER_ANCHOR = (13000.0, 0.0)
-    SELF_CAKE_ANCHOR = (-15000.0, 0.0)
-    ENEMY_CAKE_ANCHOR = (15000.0, 0.0)
+    # Projected own-perspective map anchors: lane=(x+z)/sqrt(2), width=(x-z)/sqrt(2).
+    # Tower/base raw coordinates are diagonal approximations; cake raw coordinates
+    # use observed side-specific locations.
+    SELF_BASE_ANCHOR = (-56568.54, 0.0)
+    ENEMY_BASE_ANCHOR = (56568.54, 0.0)
+    SELF_TOWER_ANCHOR = (-18384.78, 0.0)
+    ENEMY_TOWER_ANCHOR = (18384.78, 0.0)
+    # Default cake anchors are camp1's exact projected points; normal runtime
+    # lookup uses CAKE_ANCHORS_BY_CAMP for side-specific exact positions.
+    SELF_CAKE_ANCHOR = (-21453.62, -70.71)
+    ENEMY_CAKE_ANCHOR = (21524.33, 169.71)
+    BASE_ANCHORS_BY_CAMP = {
+        1: {"self": SELF_BASE_ANCHOR, "enemy": ENEMY_BASE_ANCHOR},
+        2: {"self": SELF_BASE_ANCHOR, "enemy": ENEMY_BASE_ANCHOR},
+    }
+    TOWER_ANCHORS_BY_CAMP = {
+        1: {"self": SELF_TOWER_ANCHOR, "enemy": ENEMY_TOWER_ANCHOR},
+        2: {"self": SELF_TOWER_ANCHOR, "enemy": ENEMY_TOWER_ANCHOR},
+    }
+    CAKE_ANCHORS_BY_CAMP = {
+        1: {"self": (-21453.62, -70.71), "enemy": (21524.33, 169.71)},
+        2: {"self": (-21524.33, -169.71), "enemy": (21453.62, 70.71)},
+    }
 
     SUMMONER_CANDIDATES = GameConfig.SUMMONER_SKILL_IDS
     HERO_SKILL_SLOT_ORDER = [0, 1, 2, 3, 4, 5]

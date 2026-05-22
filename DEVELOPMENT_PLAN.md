@@ -640,3 +640,36 @@
 - Added a one-shot scheduled cleanse fallback: for each tracked enemy Di Renjie ult cast, the first observed frame at or after `+12` attempts to hard-overwrite skill 2 if it is available and legal. If skill 2 is unavailable at that first eligible frame, the fallback is consumed for that ult and the policy can still use skill 2 naturally during the unmasked window.
 - Guarded force-home from overriding a cleanse hard action on the same frame.
 - Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probe covered `+11/+12/+420/+421` mask boundaries, one-shot `+12` fallback success, unavailable-at-`+12` no-retry behavior, and hardened ult-hit detection.
+
+### 11.58 2026-05-22 force-home economy and post-kill lane clear
+
+- Replaced the frame-6000 force-home shutdown with an economy gate: if the controlled hero has `moneyCnt/money_cnt/money >= 2900`, force-home clears any active phase and does not start.
+- Added a post-kill lane-clear branch: after confirmed enemy hero death, if lane `[-13000, 13000]` has no living enemy minions and HP is `<40%`, force-home can start without checking own cake or slot-4 recover availability. This branch is windowed by `FORCE_HOME_POST_KILL_WINDOW_FRAMES=900`.
+- Changed force-home return transition from `80%` HP to `70%` HP.
+- Removed force-home's special-case treatment of heal summoner `80102`; the final candidate will not carry or train this skill, so recovery-priority checks now only consider slot-4 recovery and recovery buffs.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probes covered post-kill HP 39/41%, lane uncleared, money 2900 disable, ordinary low-HP cake gate, enemy death tracking, clearing post-kill force-home state, and ignored heal-summoner readiness.
+
+### 11.59 2026-05-22 late-game own-tower minion defense reward
+
+- Added two late-game defensive scenario rewards in `agent_diy`: `enemy_minion_tower_front` penalizes living enemy minions in `(R, 1.2R]` around our tower, and `enemy_minion_under_own_tower` penalizes living enemy minions inside our tower range `R`.
+- Both rewards start from `CANNON_FRAME`, evaluate every `10` frames, require our hero and tower to be alive, cap counts at `3`, and use tower-HP multipliers `x1.5` below `50%` and `x2.0` below `25%`.
+- Added defense pressure monitors for front count, under-tower count, multiplier, and weighted reward values.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py` passed; `Config.validate()` passed; targeted reward probe covered pre-cannon no-op, `1.2R` front boundary, tower-range split, 10-frame interval gating, count caps, and low-tower HP multiplier.
+
+### 11.60 2026-05-22 summoner defaults and 133v112 sampling
+
+- Updated formal eval/exam summoner defaults from the matchup winrate table: `112v112`, `112v133`, and `133v133` now prefer `80121`; `133v112` keeps `80110`.
+- Training still samples both duel summoners `80110/80121`; train-time eval monitor panels still enumerate both skills through workflow forced-skill logic.
+- Added configurable lineup sampling weights and set `133v112` to `2x` while keeping the other three matchups at `1x`.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\definition.py agent_diy\workflow\train_workflow.py agent_diy\agent.py` passed; `Config.validate()` passed; a stubbed iterator probe confirmed 50 draws produce `133v112:20` and each other matchup `10`, and default skill selection resolves to `{112v112:80121, 112v133:80121, 133v112:80110, 133v133:80121}`.
+
+### 11.61 2026-05-22 opponent pool for next run
+
+- Updated this training round to `mixed` opponents with `selfplay` and model `276301`, weighted `0.60 / 0.40`.
+- Updated eval opponents to `common_ai`, `276301`, and `272245`; updated `kaiwu.json` model pool to `[276301, 272245]`.
+- Validation: parsed `agent_diy/conf/train_env_conf.toml` and `kaiwu.json`, confirming train opponents, weights, eval opponents, and model pool match the intended IDs.
+
+### 11.62 2026-05-22 grass field compatibility
+
+- Hardened the hero grass-state feature to read both `is_in_grass` and `isInGrass` without changing the frozen feature layout.
+- Validation: `python -m py_compile agent_diy\feature\feature_process.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probe confirmed snake-case and camel-case grass fields both set hero offset `518`.

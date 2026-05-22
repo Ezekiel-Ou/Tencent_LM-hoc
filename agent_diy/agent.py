@@ -70,7 +70,6 @@ SUMMONER_SKILL_MAP = {
 
 TOWER_SUB_TYPES = {21, "21", "ACTOR_SUB_TOWER"}
 SOLDIER_SUB_TYPES = {1, "1", 11, "11", "ACTOR_SUB_SOLDIER"}
-HEAL_SUMMONER_SKILL_ID = 80102
 
 
 @attached
@@ -115,11 +114,13 @@ class Agent(BaseAgent):
         self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
         self.prev_enemy_dead_cnt = 0
+        self.last_enemy_hero_kill_frame = -10000
         self.last_recover_success_frame = -10000
         self.last_cake_eaten_frame = -10000
         self.force_home_pending_recover = None
         self.force_home_camp = None
         self.force_home_phase = None
+        self.force_home_post_kill_active = False
         self.force_home_path_camp = None
         self.force_home_path_points = []
         self.force_home_path_ready = False
@@ -241,11 +242,13 @@ class Agent(BaseAgent):
         self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
         self.prev_enemy_dead_cnt = 0
+        self.last_enemy_hero_kill_frame = -10000
         self.last_recover_success_frame = -10000
         self.last_cake_eaten_frame = -10000
         self.force_home_pending_recover = None
         self.force_home_camp = None
         self.force_home_phase = None
+        self.force_home_post_kill_active = False
         self.force_home_path_camp = None
         self.force_home_path_points = []
         self.force_home_path_ready = False
@@ -862,12 +865,12 @@ class Agent(BaseAgent):
         self.force_home_path_camp = current_camp
         self.force_home_camp = current_camp
 
-        if int(frame_no or 0) >= GameConfig.FORCE_HOME_PHASE_END_FRAME:
+        main_hero, enemy_hero, main_tower = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None:
             self._clear_force_home_phase(clear_camp=True)
             return action
 
-        main_hero, enemy_hero, main_tower = self._find_my_hero_and_tower(frame_state)
-        if main_hero is None:
+        if self._hero_money_total(main_hero) >= GameConfig.FORCE_HOME_DISABLE_MONEY_TOTAL:
             self._clear_force_home_phase(clear_camp=True)
             return action
 
@@ -902,11 +905,13 @@ class Agent(BaseAgent):
             self._reset_force_home_progress()
 
         if self.force_home_phase == "retreat_spring":
-            if self._own_perspective_lane(main_hero) > GameConfig.FORCE_HOME_DEEP_LANE:
+            if (
+                not self.force_home_post_kill_active
+                and self._own_perspective_lane(main_hero) > GameConfig.FORCE_HOME_DEEP_LANE
+            ):
                 if (
                     self.own_cake_exists
                     or self._is_recover_skill_available(main_hero)
-                    or self._is_heal_summoner_ready(observation, main_hero)
                 ):
                     self._clear_force_home_phase(clear_camp=True)
                     return action
@@ -955,6 +960,7 @@ class Agent(BaseAgent):
 
         self.force_home_trigger_count += 1
         self.force_home_phase = "retreat_spring"
+        self.force_home_post_kill_active = self._is_post_kill_lane_cleared(frame_no, frame_state)
         current_idx = self._nearest_force_home_path_index(self._project_own_perspective(main_hero))
         self.force_home_path_index = max(0, current_idx - 1) if current_idx is not None else 0
         target = self._force_home_retreat_target(main_hero)
@@ -981,23 +987,24 @@ class Agent(BaseAgent):
         main_tower,
         enemy_dead_for_gate,
     ):
-        if int(frame_no or 0) >= GameConfig.FORCE_HOME_PHASE_END_FRAME:
+        if self._hero_money_total(main_hero) >= GameConfig.FORCE_HOME_DISABLE_MONEY_TOTAL:
             return False
-        if self.own_cake_exists:
-            return False
-        if self._is_recover_skill_available(main_hero):
-            return False
-        if self._is_heal_summoner_ready(observation, main_hero):
-            return False
-        if self._in_force_home_recover_cooldown(frame_no, hp_rate):
-            return False
-        if not self._enemy_invisible_or_far(main_hero, enemy_hero):
-            return False
+        post_kill_lane_cleared = self._is_post_kill_lane_cleared(frame_no, frame_state)
         if main_tower is None:
             return False
         if not self._tower_hp_above(main_tower, GameConfig.FORCE_HOME_TOWER_HP_MIN):
             return False
         if self._enemy_minions_under_own_tower(frame_state, main_tower) > GameConfig.FORCE_HOME_TOWER_AREA_ENEMY_MINIONS_MAX:
+            return False
+        if post_kill_lane_cleared:
+            return hp_rate < GameConfig.FORCE_HOME_POST_KILL_HP_TRIGGER
+        if self.own_cake_exists:
+            return False
+        if self._is_recover_skill_available(main_hero):
+            return False
+        if self._in_force_home_recover_cooldown(frame_no, hp_rate):
+            return False
+        if not self._enemy_invisible_or_far(main_hero, enemy_hero):
             return False
         if enemy_dead_for_gate and self._enemy_minion_in_lane_range(
             frame_state,
@@ -1009,11 +1016,31 @@ class Agent(BaseAgent):
             return False
         return True
 
+    def _hero_money_total(self, hero):
+        return float(self._get_any(hero or {}, ["moneyCnt", "money_cnt", "money"], 0) or 0)
+
+    def _in_post_kill_force_home_window(self, frame_no):
+        try:
+            frame_no = int(frame_no or 0)
+        except (TypeError, ValueError):
+            frame_no = 0
+        last_kill_frame = int(getattr(self, "last_enemy_hero_kill_frame", -10000) or -10000)
+        return 0 <= frame_no - last_kill_frame <= int(GameConfig.FORCE_HOME_POST_KILL_WINDOW_FRAMES)
+
+    def _is_post_kill_lane_cleared(self, frame_no, frame_state):
+        return self._in_post_kill_force_home_window(frame_no) and not self._enemy_minion_in_lane_range(
+            frame_state,
+            GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_LO,
+            GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_HI,
+        )
+
     def _tower_hp_above(self, tower, threshold):
         return self._unit_hp_rate(tower) > float(threshold)
 
     def _enemy_dead_for_force_home(self, frame_state, enemy_hero):
+        frame_no = int(self._get_any(frame_state or {}, ["frame_no", "frameNo"], 0) or 0)
         if self._frame_action_has_enemy_hero_death(frame_state, enemy_hero):
+            self.last_enemy_hero_kill_frame = frame_no
             return True
         if enemy_hero is None:
             return True
@@ -1021,7 +1048,10 @@ class Agent(BaseAgent):
         dead_cnt_increased = dead_cnt > int(self.prev_enemy_dead_cnt or 0)
         self.prev_enemy_dead_cnt = dead_cnt
         revive_time = int(self._get_any(enemy_hero, ["revive_time", "reviveTime"], 0) or 0)
-        return dead_cnt_increased or revive_time > 0 or self._unit_hp(enemy_hero) <= 0
+        enemy_dead = dead_cnt_increased or revive_time > 0 or self._unit_hp(enemy_hero) <= 0
+        if enemy_dead:
+            self.last_enemy_hero_kill_frame = frame_no
+        return enemy_dead
 
     def _frame_action_has_enemy_hero_death(self, frame_state, enemy_hero):
         frame_action = self._get_any(frame_state or {}, ["frame_action", "frameAction"], {}) or {}
@@ -1096,21 +1126,6 @@ class Agent(BaseAgent):
             or Args.TOWER_ATTACK_RANGE_FALLBACK
         )
 
-    def _is_heal_summoner_ready(self, observation, main_hero):
-        if not self._is_action_button_legal(observation, 8):
-            return False
-        for slot in self._slot_states(main_hero):
-            config_id = self._get_any(slot, ["config_id", "configId"], 0)
-            try:
-                if int(config_id or 0) != HEAL_SUMMONER_SKILL_ID:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            usable = bool(slot.get("usable", False))
-            cooldown = float(slot.get("cooldown", 0) or 0)
-            return usable and cooldown <= 0
-        return False
-
     def _is_action_button_legal(self, observation, button):
         legal_action = observation.get("legal_action", [])
         if legal_action is None:
@@ -1127,6 +1142,7 @@ class Agent(BaseAgent):
 
     def _clear_force_home_phase(self, clear_camp=False):
         self.force_home_phase = None
+        self.force_home_post_kill_active = False
         self.force_home_path_index = None
         self._reset_force_home_progress()
         if clear_camp:
@@ -1488,13 +1504,27 @@ class Agent(BaseAgent):
                 continue
             if self._camp_key(npc.get("camp")) == main_camp:
                 main_towers.append(npc)
-        main_tower = self._select_nearest_projected_anchor(main_towers, Args.SELF_TOWER_ANCHOR)
+        main_tower = self._select_nearest_projected_anchor(main_towers, self._tower_anchor(False))
         return main_hero, enemy_hero, main_tower
 
     def _select_nearest_projected_anchor(self, units, anchor):
         if not units:
             return None
         return sorted(units, key=lambda unit: self._dist(self._project_own_perspective(unit), anchor))[0]
+
+    def _side_anchor(self, anchors_by_camp, default_anchor, is_enemy):
+        side = "enemy" if is_enemy else "self"
+        camp_key = self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp)
+        anchors = anchors_by_camp.get(camp_key, {})
+        return anchors.get(side, default_anchor)
+
+    def _tower_anchor(self, is_enemy):
+        default_anchor = Args.ENEMY_TOWER_ANCHOR if is_enemy else Args.SELF_TOWER_ANCHOR
+        return self._side_anchor(Args.TOWER_ANCHORS_BY_CAMP, default_anchor, is_enemy)
+
+    def _cake_anchor(self, is_enemy):
+        default_anchor = Args.ENEMY_CAKE_ANCHOR if is_enemy else Args.SELF_CAKE_ANCHOR
+        return self._side_anchor(Args.CAKE_ANCHORS_BY_CAMP, default_anchor, is_enemy)
 
     def _update_own_cake_state(self, frame_state, frame_no, main_hero=None):
         frame_no = int(frame_no or 0)
@@ -1505,7 +1535,7 @@ class Agent(BaseAgent):
             pos = self._project_own_perspective(cake)
             if pos is None:
                 continue
-            if self._dist(pos, Args.SELF_CAKE_ANCHOR) <= self._dist(pos, Args.ENEMY_CAKE_ANCHOR):
+            if self._dist(pos, self._cake_anchor(False)) <= self._dist(pos, self._cake_anchor(True)):
                 found_own = True
                 own_cake_pos = pos
                 break
@@ -1515,7 +1545,7 @@ class Agent(BaseAgent):
             self.next_own_cake_frame = None
         if self.own_cake_exists and not found_own:
             main_pos = self._project_own_perspective(main_hero)
-            cake_pos = self.last_own_cake_pos or Args.SELF_CAKE_ANCHOR
+            cake_pos = self.last_own_cake_pos or self._cake_anchor(False)
             if main_pos is not None and self._dist(main_pos, cake_pos) <= GameConfig.CAKE_PICKUP_PROXIMITY:
                 self.last_cake_eaten_frame = int(frame_no or 0)
             self.last_own_cake_disappear_frame = frame_no
@@ -1540,7 +1570,7 @@ class Agent(BaseAgent):
         has_effect_buff = GameConfig.RECOVER_EFFECT_BUFF_ID in buff_ids
 
         if self.force_home_pending_recover is None and hp_rate < 0.5:
-            if self._slot_succ_used(main_hero, 4) or self._used_skill_by_config(main_hero, HEAL_SUMMONER_SKILL_ID) or has_start_buff:
+            if self._slot_succ_used(main_hero, 4) or has_start_buff:
                 self.force_home_pending_recover = {
                     "attempt_frame": frame_no,
                     "main_hp_at_attempt": main_hp,

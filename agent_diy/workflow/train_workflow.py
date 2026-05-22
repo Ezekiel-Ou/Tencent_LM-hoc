@@ -54,7 +54,10 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
         config_path="agent_diy/conf/train_env_conf.toml",
         logger=logger,
     )
-    lineup_iterator = lineup_iterator_roundrobin_camp_heroes(GameConfig.HERO_IDS)
+    lineup_iterator = lineup_iterator_roundrobin_camp_heroes(
+        GameConfig.HERO_IDS,
+        getattr(GameConfig, "LINEUP_SAMPLING_WEIGHTS", None),
+    )
 
     episode_runner = EpisodeRunner(
         env=envs[0],

@@ -25,13 +25,22 @@ def _lineup_iterator_shuffle_cycle(camps):
             yield camp
 
 
-def lineup_iterator_roundrobin_camp_heroes(camp_heroes=None):
+def lineup_iterator_roundrobin_camp_heroes(camp_heroes=None, lineup_weights=None):
     if not camp_heroes:
         raise ValueError("camp_heroes is empty")
 
     camps = []
     for lineups in itertools.product(camp_heroes, camp_heroes):
-        camps.append(list(lineups))
+        weight = 1
+        if lineup_weights:
+            weight = int(
+                lineup_weights.get(
+                    tuple(lineups),
+                    lineup_weights.get(str(tuple(lineups)), 1),
+                )
+                or 1
+            )
+        camps.extend([list(lineups)] * max(1, weight))
     return _lineup_iterator_shuffle_cycle(camps)
 
 

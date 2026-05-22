@@ -298,14 +298,31 @@ class FeatureProcess:
                 self_towers.append(npc)
             else:
                 enemy_towers.append(npc)
-        self_tower = self._select_nearest_anchor(self_towers, Args.SELF_TOWER_ANCHOR)
-        enemy_tower = self._select_nearest_anchor(enemy_towers, Args.ENEMY_TOWER_ANCHOR)
+        self_tower = self._select_nearest_anchor(self_towers, self._tower_anchor(False))
+        enemy_tower = self._select_nearest_anchor(enemy_towers, self._tower_anchor(True))
         return self_tower, enemy_tower
 
     def _select_nearest_anchor(self, units, anchor):
         if not units:
             return None
         return sorted(units, key=lambda unit: self._dist(self._position(unit), anchor))[0]
+
+    def _side_anchor(self, anchors_by_camp, default_anchor, is_enemy):
+        side = "enemy" if is_enemy else "self"
+        anchors = anchors_by_camp.get(self._camp_key(self.main_camp), {})
+        return anchors.get(side, default_anchor)
+
+    def _base_anchor(self, is_enemy):
+        default_anchor = Args.ENEMY_BASE_ANCHOR if is_enemy else Args.SELF_BASE_ANCHOR
+        return self._side_anchor(Args.BASE_ANCHORS_BY_CAMP, default_anchor, is_enemy)
+
+    def _tower_anchor(self, is_enemy):
+        default_anchor = Args.ENEMY_TOWER_ANCHOR if is_enemy else Args.SELF_TOWER_ANCHOR
+        return self._side_anchor(Args.TOWER_ANCHORS_BY_CAMP, default_anchor, is_enemy)
+
+    def _cake_anchor(self, is_enemy):
+        default_anchor = Args.ENEMY_CAKE_ANCHOR if is_enemy else Args.SELF_CAKE_ANCHOR
+        return self._side_anchor(Args.CAKE_ANCHORS_BY_CAMP, default_anchor, is_enemy)
 
     def _soldier_sort_key(self, soldier, is_enemy):
         pos = self._position(soldier)
@@ -344,7 +361,7 @@ class FeatureProcess:
             pos = self._position(cake)
             if pos is None:
                 continue
-            if self._dist(pos, Args.SELF_CAKE_ANCHOR) <= self._dist(pos, Args.ENEMY_CAKE_ANCHOR):
+            if self._dist(pos, self._cake_anchor(False)) <= self._dist(pos, self._cake_anchor(True)):
                 self_cake = cake if self_cake is None else self_cake
             else:
                 enemy_cake = cake if enemy_cake is None else enemy_cake
@@ -615,7 +632,7 @@ class FeatureProcess:
             values.extend(self._skill_slot_feature(self._slot_state(hero, slot_idx), slot_idx, config_id, side))
         values.extend(self._level_one_hot(hero))
         values.extend(self._hero_money_feature(hero, side))
-        values.append(float(bool(_get(hero, "is_in_grass", False))))
+        values.append(float(bool(_get_any(hero, ["is_in_grass", "isInGrass"], False))))
         values.extend(self._hero_tower_relation(hero))
         values.extend(self._hero_buff_feature(hero, side))
         values.extend(self._recent_event_feature(hero, side))
@@ -882,7 +899,7 @@ class FeatureProcess:
         hp = self._hp_ratio(hero)
         hero_pos = self._position(hero)
         enemy_pos = self.enemy_pos if side == "self" else self.self_pos
-        base = Args.SELF_BASE_ANCHOR if side == "self" else Args.ENEMY_BASE_ANCHOR
+        base = self._base_anchor(side == "enemy")
         move_legal = 0.0
         if self.legal_action is not None and self.legal_action.shape[0] >= 10:
             move_legal = float(self.legal_action[2] > 0)
@@ -976,7 +993,7 @@ class FeatureProcess:
             core = [0.0] * Args.DIM_UNIT_CORE
         else:
             core = self._process_unit_core(tower)
-        anchor = Args.ENEMY_TOWER_ANCHOR if is_enemy else Args.SELF_TOWER_ANCHOR
+        anchor = self._tower_anchor(is_enemy)
         values = list(core)
         values.extend(self._tower_anchor_feature(anchor, is_enemy))
         sub_type = self._sub_type(tower)
@@ -1006,12 +1023,14 @@ class FeatureProcess:
         return values
 
     def _tower_anchor_feature(self, anchor, is_enemy):
-        self_dist = self._dist_ratio(self.self_pos, anchor)
-        enemy_dist = self._dist_ratio(self.enemy_pos, anchor)
+        self_dist = self._dist_ratio(self.self_pos, anchor, scale=12000.0)
+        enemy_dist = self._dist_ratio(self.enemy_pos, anchor, scale=12000.0)
         self_lane = self.self_pos[0] if self.self_pos else 0.0
         enemy_lane = self.enemy_pos[0] if self.enemy_pos else 0.0
-        low, high = sorted([Args.SELF_TOWER_ANCHOR[0], Args.ENEMY_TOWER_ANCHOR[0]])
-        lane_forward = _clip((self_lane - Args.SELF_TOWER_ANCHOR[0]) / max(1.0, Args.ENEMY_TOWER_ANCHOR[0] - Args.SELF_TOWER_ANCHOR[0]), 0.0, 1.0)
+        self_anchor = self._tower_anchor(False)
+        enemy_anchor = self._tower_anchor(True)
+        low, high = sorted([self_anchor[0], enemy_anchor[0]])
+        lane_forward = _clip((self_lane - self_anchor[0]) / max(1.0, enemy_anchor[0] - self_anchor[0]), 0.0, 1.0)
         return [
             _clip(anchor[0] / Args.GLOBAL_LANE_HALF, -1.0, 1.0),
             _clip(anchor[1] / Args.GLOBAL_WIDTH_HALF, -1.0, 1.0),
@@ -1052,20 +1071,22 @@ class FeatureProcess:
         ]
 
     def _cake_feature(self, cake, is_enemy):
-        anchor = Args.ENEMY_CAKE_ANCHOR if is_enemy else Args.SELF_CAKE_ANCHOR
+        anchor = self._cake_anchor(is_enemy)
         side = "enemy" if is_enemy else "self"
         exists = cake is not None
         if exists:
             self.next_cake_frame[side] = self.frame_no + int(Args.CAKE_RESPAWN_SECONDS * 30)
         respawn = _clip((self.next_cake_frame[side] - self.frame_no) / max(1.0, Args.CAKE_RESPAWN_SECONDS * 30), 0.0, 1.0) if not exists else 0.0
-        self_dist = self._dist_ratio(self.self_pos, anchor)
-        enemy_dist = self._dist_ratio(self.enemy_pos, anchor)
+        self_raw_dist = self._dist(self.self_pos, anchor)
+        enemy_raw_dist = self._dist(self.enemy_pos, anchor)
+        self_dist = _clip(self_raw_dist / 12000.0, 0.0, 1.0)
+        self_dist_global = math.sqrt(_clip(self_raw_dist / Args.GLOBAL_LANE_HALF, 0.0, 1.0))
         return [
             float(exists),
             self_dist,
-            enemy_dist,
+            self_dist_global,
             float(self._hp_ratio(self.self_hero) <= 0.50),
-            float(enemy_dist > self_dist and not self._in_tower_range(self.self_hero, self.enemy_tower, is_enemy_tower=True)),
+            _clip(enemy_raw_dist / 12000.0, 0.0, 1.0),
             respawn,
         ]
 
@@ -1332,7 +1353,7 @@ class FeatureProcess:
         return _safe_float(_get(tower or {}, "attack_range", 0), 0.0) or Args.TOWER_ATTACK_RANGE_FALLBACK
 
     def _tower_pos(self, tower, is_enemy):
-        return self._position(tower) or (Args.ENEMY_TOWER_ANCHOR if is_enemy else Args.SELF_TOWER_ANCHOR)
+        return self._position(tower) or self._tower_anchor(is_enemy)
 
     def _hp_ratio(self, unit):
         if unit is None:
@@ -1410,8 +1431,8 @@ class FeatureProcess:
 
     def _update_cake_attempts(self):
         for side, cake, anchor in (
-            ("self", self.self_cake, Args.SELF_CAKE_ANCHOR),
-            ("enemy", self.enemy_cake, Args.ENEMY_CAKE_ANCHOR),
+            ("self", self.self_cake, self._cake_anchor(False)),
+            ("enemy", self.enemy_cake, self._cake_anchor(True)),
         ):
             existed = self.last_cake_exists.get(side, False)
             exists = cake is not None

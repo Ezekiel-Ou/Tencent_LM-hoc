@@ -9,7 +9,7 @@ Reward manager adapted from hok_semi and remapped to the current hok1v1 dict pro
 
 import math
 
-from agent_diy.conf.conf import GameConfig
+from agent_diy.conf.conf import Args, GameConfig
 
 
 TOWER_SUB_TYPES = {21, "21", "ACTOR_SUB_TOWER"}
@@ -28,6 +28,8 @@ SKILL_HIT_REWARD_KEYS = set(SKILL_HIT_HERO_REWARD_KEYS.values()) | {
 SCENARIO_REWARD_KEYS = {
     "minion_tower_push",
     "enemy_dead_enemy_cake",
+    "enemy_minion_tower_front",
+    "enemy_minion_under_own_tower",
 }
 
 
@@ -152,11 +154,17 @@ class GameRewardManager:
         # enemy-dead cake invades.
         self._minion_tower_push_value = 0.0
         self._enemy_dead_enemy_cake_value = 0.0
+        self._enemy_minion_tower_front_value = 0.0
+        self._enemy_minion_under_own_tower_value = 0.0
         self._prev_enemy_tower_hp_for_push = None
         self._prev_main_enemy_tower_dist = None
         self._last_tower_push_eval_frame = -10000
         self._prev_enemy_cake_dist = None
         self._last_enemy_dead_cake_eval_frame = -10000
+        self._last_enemy_minion_defense_eval_frame = -10000
+        self._enemy_minion_defense_debug = self._empty_enemy_minion_defense_debug()
+        self._prev_enemy_dead_cnt_for_reward = 0
+        self._last_enemy_hero_dead_frame_for_reward = -10000
         self.init_max_exp_of_each_hero()
 
     def init_max_exp_of_each_hero(self):
@@ -271,6 +279,16 @@ class GameRewardManager:
                     reward_struct.cur_frame_value = float(self._enemy_dead_enemy_cake_value)
                 else:
                     reward_struct.cur_frame_value = 0.0
+            elif reward_name == "enemy_minion_tower_front":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._enemy_minion_tower_front_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
+            elif reward_name == "enemy_minion_under_own_tower":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._enemy_minion_under_own_tower_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
             elif reward_name in ("win", "no_op_streak_penalty"):
                 reward_struct.cur_frame_value = 0.0
 
@@ -329,6 +347,10 @@ class GameRewardManager:
         self._enemy_dead_enemy_cake_value = self._detect_enemy_dead_enemy_cake(
             frame_data, main_hero, enemy_hero, enemy_tower, own_soldiers_in_enemy_tower
         )
+        (
+            self._enemy_minion_tower_front_value,
+            self._enemy_minion_under_own_tower_value,
+        ) = self._detect_enemy_minion_own_tower_pressure(frame_data, main_hero, main_tower)
         self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
         self.set_cur_calc_frame_vec(self.m_enemy_calc_frame_map, frame_data, enemy_camp)
 
@@ -406,6 +428,7 @@ class GameRewardManager:
         reward_dict.update(self._recover_debug)
         reward_dict["enemy_cleansed_us_count"] = float(self._cleanse_enemy_count)
         reward_dict.update(self._duel_summoner_debug)
+        reward_dict.update(self._enemy_minion_defense_debug)
         reward_dict["direnjie_skill3_followup_count"] = float(self._direnjie_skill3_followup_count_value)
         self.has_last_frame = True
         return reward_dict
@@ -536,6 +559,13 @@ class GameRewardManager:
             "duel_summoner_80121_cast_count": 0.0,
             "duel_summoner_80110_good_count": 0.0,
             "duel_summoner_80121_good_count": 0.0,
+        }
+
+    def _empty_enemy_minion_defense_debug(self):
+        return {
+            "enemy_minion_tower_front_count": 0.0,
+            "enemy_minion_under_own_tower_count": 0.0,
+            "enemy_minion_defense_multiplier": 1.0,
         }
 
     def _actor_runtime(self, actor):
@@ -1297,8 +1327,9 @@ class GameRewardManager:
 
     def _detect_enemy_dead_enemy_cake(self, frame_data, main_hero, enemy_hero, enemy_tower, own_soldier_count):
         frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)
-        enemy_cake = self._enemy_cake(frame_data, enemy_tower)
-        current_dist = self._distance_to_entity(main_hero, enemy_cake)
+        enemy_cake_pos = self._enemy_cake_pos(frame_data, main_hero, enemy_tower)
+        main_pos = self._entity_pos(main_hero)
+        current_dist = math.dist(main_pos, enemy_cake_pos) if main_pos is not None and enemy_cake_pos is not None else None
         prev_dist = self._prev_enemy_cake_dist
         self._prev_enemy_cake_dist = current_dist
 
@@ -1306,11 +1337,11 @@ class GameRewardManager:
             return 0.0
         if frame_no >= GameConfig.CANNON_FRAME:
             return 0.0
-        if not self._is_enemy_dead(enemy_hero):
+        if not self._is_enemy_dead_for_reward(frame_data, main_hero, enemy_hero):
             return 0.0
-        if own_soldier_count < GameConfig.ENEMY_DEAD_CAKE_MIN_SOLDIERS:
+        if not self._enemy_tower_has_safe_soldier_cover(frame_data, main_hero, enemy_tower, own_soldier_count):
             return 0.0
-        if enemy_cake is None or current_dist is None:
+        if enemy_cake_pos is None or current_dist is None:
             return 0.0
         if enemy_tower is None or float(_hp(enemy_tower) or 0) <= 0:
             return 0.0
@@ -1325,7 +1356,94 @@ class GameRewardManager:
             and current_dist < prev_dist - GameConfig.ENEMY_DEAD_CAKE_APPROACH_DELTA
         ):
             return GameConfig.ENEMY_DEAD_CAKE_APPROACH_REWARD
+        if current_dist <= GameConfig.ENEMY_DEAD_CAKE_ZONE_RANGE:
+            return GameConfig.ENEMY_DEAD_CAKE_ZONE_REWARD
         return 0.0
+
+    def _detect_enemy_minion_own_tower_pressure(self, frame_data, main_hero, main_tower):
+        self._enemy_minion_defense_debug = self._empty_enemy_minion_defense_debug()
+        frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)
+        if frame_no < GameConfig.CANNON_FRAME:
+            return 0.0, 0.0
+        if frame_no - self._last_enemy_minion_defense_eval_frame < GameConfig.ENEMY_MINION_DEFENSE_EVAL_INTERVAL:
+            return 0.0, 0.0
+        if main_hero is None or main_tower is None:
+            return 0.0, 0.0
+        if float(_hp(main_hero) or 0) <= 0 or float(_hp(main_tower) or 0) <= 0:
+            return 0.0, 0.0
+
+        tower_pos = self._entity_pos(main_tower)
+        if tower_pos is None:
+            return 0.0, 0.0
+        tower_range = self._tower_attack_range(main_tower)
+        front_range = tower_range * GameConfig.ENEMY_MINION_TOWER_FRONT_RANGE_MULTIPLIER
+        main_camp = _camp_key(_get(main_hero, "camp", None))
+        front_count = 0
+        under_count = 0
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == main_camp:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            pos = self._entity_pos(npc)
+            if pos is None:
+                continue
+            dist = math.dist(pos, tower_pos)
+            if dist <= tower_range:
+                under_count += 1
+            elif dist <= front_range:
+                front_count += 1
+
+        if front_count <= 0 and under_count <= 0:
+            return 0.0, 0.0
+
+        self._last_enemy_minion_defense_eval_frame = frame_no
+        multiplier = self._enemy_minion_defense_multiplier(main_tower)
+        front_value = self._capped_count_reward(
+            front_count,
+            GameConfig.ENEMY_MINION_TOWER_FRONT_REWARD,
+            GameConfig.ENEMY_MINION_TOWER_FRONT_CAP,
+        ) * multiplier
+        under_value = self._capped_count_reward(
+            under_count,
+            GameConfig.ENEMY_MINION_UNDER_OWN_TOWER_REWARD,
+            GameConfig.ENEMY_MINION_UNDER_OWN_TOWER_CAP,
+        ) * multiplier
+        self._enemy_minion_defense_debug = {
+            "enemy_minion_tower_front_count": float(front_count),
+            "enemy_minion_under_own_tower_count": float(under_count),
+            "enemy_minion_defense_multiplier": float(multiplier),
+        }
+        return front_value, under_value
+
+    def _enemy_minion_defense_multiplier(self, main_tower):
+        hp_rate = _hp_rate(main_tower or {})
+        if 0.0 < hp_rate < GameConfig.ENEMY_MINION_DEFENSE_TOWER_HP_LOW:
+            return GameConfig.ENEMY_MINION_DEFENSE_LOW_MULTIPLIER
+        if 0.0 < hp_rate < GameConfig.ENEMY_MINION_DEFENSE_TOWER_HP_MID:
+            return GameConfig.ENEMY_MINION_DEFENSE_MID_MULTIPLIER
+        return 1.0
+
+    def _capped_count_reward(self, count, reward_per_unit, reward_cap):
+        capped_count = min(max(int(count or 0), 0), GameConfig.ENEMY_MINION_DEFENSE_COUNT_CAP)
+        value = float(reward_per_unit) * capped_count
+        return max(float(reward_cap), value)
+
+    def _enemy_tower_has_safe_soldier_cover(self, frame_data, main_hero, enemy_tower, own_soldier_count):
+        if own_soldier_count < GameConfig.ENEMY_DEAD_CAKE_MIN_SOLDIERS:
+            return False
+        return self._tower_target_is_non_hero(frame_data, enemy_tower)
+
+    def _tower_target_is_non_hero(self, frame_data, tower):
+        target_runtime = _get(tower or {}, "attack_target", None)
+        if target_runtime is None:
+            return False
+        for hero in frame_data.get("hero_states", []) or []:
+            if self._actor_runtime(hero) == target_runtime and float(_hp(hero) or 0) > 0:
+                return False
+        return True
 
     def _tower_push_context(self, main_hero, enemy_hero, enemy_tower, own_soldier_count):
         if main_hero is None or enemy_tower is None:
@@ -1404,6 +1522,26 @@ class GameRewardManager:
                 cakes_with_dist.append((math.dist(pos, tower_pos), cake))
         return sorted(cakes_with_dist, key=lambda item: item[0])[0][1] if cakes_with_dist else None
 
+    def _enemy_cake_pos(self, frame_data, main_hero, enemy_tower):
+        enemy_cake = self._enemy_cake(frame_data, enemy_tower)
+        pos = self._entity_pos(enemy_cake)
+        if pos is not None:
+            return pos
+        return self._enemy_cake_anchor_raw(main_hero)
+
+    def _enemy_cake_anchor_raw(self, main_hero):
+        main_camp = _camp_key(_get(main_hero or {}, "camp", None))
+        anchor = Args.CAKE_ANCHORS_BY_CAMP.get(main_camp, {}).get("enemy")
+        if anchor is None:
+            return None
+        lane, width = anchor
+        sqrt2 = math.sqrt(2.0)
+        x = (float(lane) + float(width)) / sqrt2
+        z = (float(lane) - float(width)) / sqrt2
+        if main_camp == 2:
+            x, z = -x, -z
+        return x, z
+
     def _distance_to_enemy_tower(self, main_hero, enemy_tower):
         return self._distance_to_entity(main_hero, enemy_tower)
 
@@ -1416,6 +1554,49 @@ class GameRewardManager:
 
     def _is_enemy_dead(self, enemy_hero):
         return enemy_hero is not None and float(_hp(enemy_hero) or 0) <= 0
+
+    def _is_enemy_dead_for_reward(self, frame_data, main_hero, enemy_hero):
+        frame_no = int(_get_any(frame_data or {}, ["frame_no", "frameNo"], 0) or 0)
+        if self._frame_action_has_enemy_hero_death(frame_data, main_hero, enemy_hero):
+            self._last_enemy_hero_dead_frame_for_reward = frame_no
+            return True
+        if enemy_hero is None:
+            return self._in_recent_enemy_dead_window(frame_no)
+
+        dead_cnt = int(_get_any(enemy_hero, ["dead_cnt", "deadCnt"], 0) or 0)
+        dead_cnt_increased = dead_cnt > int(self._prev_enemy_dead_cnt_for_reward or 0)
+        self._prev_enemy_dead_cnt_for_reward = dead_cnt
+        revive_time = int(_get_any(enemy_hero, ["revive_time", "reviveTime"], 0) or 0)
+        enemy_dead = dead_cnt_increased or revive_time > 0 or float(_hp(enemy_hero) or 0) <= 0
+        if enemy_dead:
+            self._last_enemy_hero_dead_frame_for_reward = frame_no
+            return True
+        return False
+
+    def _in_recent_enemy_dead_window(self, frame_no):
+        last_dead_frame = int(self._last_enemy_hero_dead_frame_for_reward or -10000)
+        return 0 <= int(frame_no or 0) - last_dead_frame <= int(GameConfig.FORCE_HOME_POST_KILL_WINDOW_FRAMES)
+
+    def _frame_action_has_enemy_hero_death(self, frame_data, main_hero, enemy_hero):
+        frame_action = _get_any(frame_data or {}, ["frame_action", "frameAction"], {}) or {}
+        dead_actions = _get_any(frame_action, ["dead_action", "deadAction"], []) or []
+        if not isinstance(dead_actions, list):
+            return False
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        main_camp = _camp_key(_get(main_hero or {}, "camp", None))
+        for dead_action in dead_actions:
+            if not isinstance(dead_action, dict):
+                continue
+            death = _get_any(dead_action, ["death", "dead"], {}) or {}
+            death_runtime = self._actor_runtime(death)
+            if enemy_runtime is not None and death_runtime == enemy_runtime:
+                return True
+            death_camp = _camp_key(_get(death, "camp", None))
+            death_config_id = int(_get_any(death, ["config_id", "configId"], 0) or 0)
+            if main_camp in (1, 2) and death_camp in (1, 2) and death_camp != main_camp:
+                if death_config_id in GameConfig.HERO_IDS:
+                    return True
+        return False
 
     def _is_enemy_far_from_tower(self, enemy_hero, enemy_tower):
         dist = self._distance_to_entity(enemy_hero, enemy_tower)

@@ -55,9 +55,20 @@ def build_monitor():
         "reward_safe_last_hit",
         "reward_minion_tower_push",
         "reward_enemy_dead_enemy_cake",
+        "reward_enemy_minion_tower_front",
+        "reward_enemy_minion_under_own_tower",
         "reward_forward",
     ):
         config = _add_metric(config, metric_name, "0.0001")
+    config = config.end_panel()
+
+    config = config.add_panel(name="defense_pressure", name_en="defense_pressure", type="line")
+    for metric_name, precision in (
+        ("enemy_minion_tower_front_count", "0.01"),
+        ("enemy_minion_under_own_tower_count", "0.01"),
+        ("enemy_minion_defense_multiplier", "0.01"),
+    ):
+        config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
 
     config = config.add_panel(name="combat_reward", name_en="combat_reward", type="line")
