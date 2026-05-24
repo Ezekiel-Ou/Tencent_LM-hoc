@@ -305,6 +305,20 @@ class EpisodeRunner:
                             monitor_data["force_home_return_count"] = float(
                                 getattr(self.agents[monitor_side], "force_home_return_count", 0)
                             )
+                            monitor_data["force_home_post_kill_no_enemy_minion_visible_count"] = float(
+                                getattr(
+                                    self.agents[monitor_side],
+                                    "force_home_post_kill_no_enemy_minion_visible_count",
+                                    0,
+                                )
+                            )
+                            monitor_data["force_home_post_kill_own_wave_confirm_count"] = float(
+                                getattr(
+                                    self.agents[monitor_side],
+                                    "force_home_post_kill_own_wave_confirm_count",
+                                    0,
+                                )
+                            )
                             monitor_data["opening_unstuck_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_unstuck_count", 0)
                             )

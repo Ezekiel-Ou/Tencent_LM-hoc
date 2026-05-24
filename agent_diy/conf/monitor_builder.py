@@ -57,6 +57,7 @@ def build_monitor():
         "reward_enemy_dead_enemy_cake",
         "reward_enemy_minion_tower_front",
         "reward_enemy_minion_under_own_tower",
+        "reward_river_crab_pressure",
         "reward_forward",
     ):
         config = _add_metric(config, metric_name, "0.0001")
@@ -67,6 +68,7 @@ def build_monitor():
         ("enemy_minion_tower_front_count", "0.01"),
         ("enemy_minion_under_own_tower_count", "0.01"),
         ("enemy_minion_defense_multiplier", "0.01"),
+        ("river_crab_pressure_count", "0.01"),
     ):
         config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
@@ -93,7 +95,9 @@ def build_monitor():
         "reward_direnjie_skill1_hit_enemy_hero",
         "reward_direnjie_skill3_hit_enemy_hero",
         "reward_direnjie_skill3_followup_damage",
+        "reward_direnjie_skill3_miss",
         "direnjie_skill3_followup_count",
+        "direnjie_skill3_miss_count",
     ):
         config = _add_metric(config, metric_name, "0.0001")
     config = config.end_panel()
@@ -146,6 +150,8 @@ def build_monitor():
         "force_home_start_count",
         "force_home_retreat_count",
         "force_home_return_count",
+        "force_home_no_emy_minion_cnt",
+        "force_home_own_wave_cnt",
         "opening_unstuck_count",
         "cleanse_override_count",
         "skill2_blocked_count",

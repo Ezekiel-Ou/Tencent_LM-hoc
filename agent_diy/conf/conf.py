@@ -36,10 +36,10 @@ class GameConfig:
         133: DUEL_SUMMONER_SKILL_IDS.copy(),
     }
     SUMMONER_SKILL_MATCHUP_WINRATE = {
-        (112, 112): {80110: 0.90, 80121: 0.95},
-        (112, 133): {80110: 0.95, 80121: 1.00},
-        (133, 112): {80110: 0.32, 80121: 0.18},
-        (133, 133): {80110: 0.85, 80121: 0.90},
+        (112, 112): {80110: 0.95, 80121: 0.90},
+        (112, 133): {80110: 0.95, 80121: 0.90},
+        (133, 112): {80110: 0.95, 80121: 0.90},
+        (133, 133): {80110: 0.95, 80121: 0.90},
     }
     LINEUP_SAMPLING_WEIGHTS = {
         (112, 112): 1,
@@ -86,6 +86,7 @@ class GameConfig:
         "direnjie_skill1_hit_enemy_hero": 0.10,
         "direnjie_skill3_hit_enemy_hero": 0.40,
         "direnjie_skill3_followup_damage": 0.10,
+        "direnjie_skill3_miss": -0.10,
         # Eating a health cake. The event value is tiered by pre-pickup HP:
         # hp<0.2 => 1.0, hp<0.5 => 0.5, hp<=0.8 => 0.3, hp>0.8 => -0.5.
         "cake_pickup": 1.0,
@@ -104,6 +105,9 @@ class GameConfig:
         # range are penalized before tower HP damage becomes the only signal.
         "enemy_minion_tower_front": 1.0,
         "enemy_minion_under_own_tower": 1.0,
+        # Small safe-window shaping for damaging river crab before the sparse
+        # money/exp payoff arrives.
+        "river_crab_pressure": 1.0,
         # Terminal sparse reward injected at game over. Weight stays 1.0; the
         # event value is +/- TERMINAL_WIN_REWARD.
         "win": 1.0,
@@ -113,7 +117,20 @@ class GameConfig:
         # Workflow-injected action penalty once no-op streak reaches threshold.
         "no_op_streak_penalty": 1.0,
     }
-    REMOVE_FORWARD_AFTER = 500
+    # Opening lane-control shaping. The key stays "forward" for checkpoint and
+    # monitor compatibility, but the signal is no longer "walk toward enemy
+    # tower": it only teaches first-wave timing.
+    OPENING_TOWER_REACH_END_FRAME = 450
+    OPENING_PREWAVE_ADVANCE_START_FRAME = 750
+    OPENING_PREWAVE_END_FRAME = 840
+    OPENING_TOWER_TARGET_LANE = -18384.78
+    OPENING_PREWAVE_TARGET_LANE = -9000.0
+    OPENING_TARGET_BAND = 2500.0
+    OPENING_APPROACH_SCALE = 50000.0
+    OPENING_APPROACH_CLIP = 1.0
+    OPENING_ENEMY_HALF_PENALTY_SCALE = 6000.0
+    OPENING_ENEMY_HALF_PENALTY = -0.25
+    REMOVE_FORWARD_AFTER = OPENING_PREWAVE_END_FRAME
     REWARD_DEBUG_KEY_LIST = [
         "cake_high_hp_penalty_count",
         "recover_attempt_count",
@@ -132,9 +149,11 @@ class GameConfig:
         "duel_summoner_80110_good_count",
         "duel_summoner_80121_good_count",
         "direnjie_skill3_followup_count",
+        "direnjie_skill3_miss_count",
         "enemy_minion_tower_front_count",
         "enemy_minion_under_own_tower_count",
         "enemy_minion_defense_multiplier",
+        "river_crab_pressure_count",
     ]
     ACTION_DEBUG_KEY_LIST = [
         "action_noop_count",
@@ -162,15 +181,19 @@ class GameConfig:
         "luban_skill1_aim_assist_count",
     ]
     LUBAN_SKILL1_AIM_ASSIST = True
-    LUBAN_SKILL1_AIM_RANGE = 8800.0
+    LUBAN_SKILL1_AIM_RANGE = 16000.0
     LUBAN_SKILL1_AIM_CENTER = 8
-    LUBAN_SKILL1_AIM_TARGET = 1
+    LUBAN_SKILL1_AIM_TARGET = 2
+    LUBAN_SKILL1_AIM_MIN_BUCKET = 1
+    LUBAN_SKILL1_AIM_DEADZONE = 300.0
     TERMINAL_WIN_REWARD = 3.0
     LUBAN_SKILL1_SOLDIER_HIT_WINDOW = 12
     LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
     CLEANSE_WINDOW_FRAMES = 300
+    DI_RENJIE_CLEANSE_RETRY_WINDOW = 20
     DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 12
     DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END = 420
+    DI_RENJIE_SKILL3_MISS_WINDOW = 30
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW_EARLY = 60
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW = 150
     DI_RENJIE_SKILL3_FOLLOWUP_CAP = 8
@@ -202,6 +225,11 @@ class GameConfig:
     ENEMY_MINION_DEFENSE_TOWER_HP_LOW = 0.25
     ENEMY_MINION_DEFENSE_MID_MULTIPLIER = 1.5
     ENEMY_MINION_DEFENSE_LOW_MULTIPLIER = 2.0
+    RIVER_CRAB_CONFIG_IDS = [6827]
+    RIVER_CRAB_HERO_SAFE_RANGE = 9000.0
+    RIVER_CRAB_PRESSURE_EVAL_INTERVAL = 5
+    RIVER_CRAB_PRESSURE_REWARD = 0.02
+    RIVER_CRAB_PRESSURE_CAP = 0.4
     CANNON_FRAME = 6254
     DEATH_MULTIPLIER_BEFORE_CANNON = 0.7
     DEATH_MULTIPLIER_AFTER_CANNON = 1.3
@@ -237,6 +265,7 @@ class GameConfig:
     FORCE_HOME_HP_RECOVERED = 0.70
     FORCE_HOME_POST_KILL_HP_TRIGGER = 0.40
     FORCE_HOME_POST_KILL_WINDOW_FRAMES = 900
+    FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE = 6000.0
     FORCE_HOME_TOWER_HP_MIN = 0.40
     FORCE_HOME_ENEMY_SAFE_RANGE = 10000.0
     FORCE_HOME_TOWER_AREA_ENEMY_MINIONS_MAX = 0
@@ -245,9 +274,12 @@ class GameConfig:
     FORCE_HOME_DEEP_LANE = -30000.0
     FORCE_HOME_RECOVER_COOLDOWN_FRAMES = 120
     CAKE_PICKUP_PROXIMITY = 1500.0
-    FORCE_HOME_RETURN_EXIT_LANE = -18000.0
-    FORCE_HOME_PATH_VALID_EXIT_LANE = -18000.0
-    FORCE_HOME_PATH_RECORD_FRAMES = 600
+    # Fallback lanes for force-home path validation/return. Runtime logic uses
+    # the camp-aware own cake anchor when available, so forced return exits near
+    # the safe health-cake area instead of walking all the way to first tower.
+    FORCE_HOME_RETURN_EXIT_LANE = -21453.62
+    FORCE_HOME_PATH_VALID_EXIT_LANE = -21453.62
+    FORCE_HOME_PATH_RECORD_FRAMES = 450
     FORCE_HOME_PATH_MAX_POINTS = 24
     FORCE_HOME_PATH_MIN_POINTS = 5
     FORCE_HOME_PATH_MIN_DISTANCE = 1200.0
@@ -271,6 +303,7 @@ class GameConfig:
         "enemy_dead_enemy_cake": 0.0,
         "enemy_minion_tower_front": 0.0,
         "enemy_minion_under_own_tower": 0.0,
+        "river_crab_pressure": 0.0,
         "win": 0.0,
         "duel_summoner_timing": 0.0,
         "no_op_streak_penalty": 0.0,

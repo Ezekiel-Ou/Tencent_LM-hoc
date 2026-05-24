@@ -138,6 +138,8 @@ class Agent(BaseAgent):
         self.force_home_start_count = 0
         self.force_home_retreat_count = 0
         self.force_home_return_count = 0
+        self.force_home_post_kill_no_enemy_minion_visible_count = 0
+        self.force_home_post_kill_own_wave_confirm_count = 0
         self.opening_unstuck_count = 0
         self.opening_unstuck_last_pos = None
         self.opening_unstuck_last_frame = None
@@ -150,6 +152,8 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._cleanse_retry_until_frame = None
+        self._cleanse_retry_hit_frame = None
         self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
@@ -160,12 +164,16 @@ class Agent(BaseAgent):
             return self.target_lr / self.lr
         return 1.0 - ((1.0 - self.target_lr / self.lr) * step / self.target_step)
 
-    def init_config(self, config_data):
-        my_heroes = config_data.get("my_heroes", [])
-        opponent_heroes = config_data.get("opponent_heroes", [])
+    def init_config(self, config_data=None):
+        config_data = {} if config_data is None else config_data
+        my_heroes, opponent_heroes, return_dict = self._parse_init_lineups(config_data)
         opponent_hero = opponent_heroes[0] if opponent_heroes else None
-        is_eval = bool(config_data.get("is_eval", False))
-        forced_skill = config_data.get("forced_summoner_skill", None)
+        forced_skill = config_data.get("forced_summoner_skill", None) if isinstance(config_data, dict) else None
+        # Local training workflow always passes is_eval explicitly. If the
+        # official evaluator calls init_config(lineups) without that flag, treat
+        # it as formal eval/exam and use the matchup table instead of cycling
+        # through train-time exploration candidates.
+        is_eval = bool(config_data.get("is_eval", True)) if isinstance(config_data, dict) else True
         select_skills = {}
         for hero_id in my_heroes:
             if forced_skill is not None:
@@ -174,7 +182,58 @@ class Agent(BaseAgent):
                 select_skills[hero_id] = self._default_summoner_skill(hero_id, opponent_hero)
             else:
                 select_skills[hero_id] = self._select_train_summoner_skill(hero_id, opponent_hero)
-        return select_skills
+        if return_dict:
+            return select_skills
+        if select_skills:
+            return int(next(iter(select_skills.values())))
+        return int(GameConfig.DEFAULT_SUMMONER_SKILL)
+
+    def _parse_init_lineups(self, config_data):
+        if isinstance(config_data, dict) and "my_heroes" in config_data:
+            return (
+                [int(hero_id) for hero_id in config_data.get("my_heroes", [])],
+                [int(hero_id) for hero_id in config_data.get("opponent_heroes", [])],
+                True,
+            )
+
+        lineups = config_data.get("lineups", config_data) if isinstance(config_data, dict) else config_data
+        if isinstance(lineups, dict):
+            blue_heroes = self._extract_hero_ids(lineups.get("blue_camp", lineups.get("blueCamp", [])))
+            red_heroes = self._extract_hero_ids(lineups.get("red_camp", lineups.get("redCamp", [])))
+            camp = config_data.get("my_camp", config_data.get("camp", self.hero_camp)) if isinstance(config_data, dict) else self.hero_camp
+            if camp in (2, "2", "red_camp", "PLAYERCAMP_2"):
+                return red_heroes, blue_heroes, False
+            if camp in (1, "1", "blue_camp", "PLAYERCAMP_1"):
+                return blue_heroes, red_heroes, False
+            if len(blue_heroes) == 1 and len(red_heroes) == 1:
+                return blue_heroes, red_heroes, False
+            heroes = self._extract_hero_ids(lineups)
+            return heroes[:1], heroes[1:2], False
+
+        heroes = self._extract_hero_ids(lineups)
+        return heroes[:1], heroes[1:2], False
+
+    def _extract_hero_ids(self, value):
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            for key in ("hero_id", "heroId", "config_id", "configId"):
+                if key in value:
+                    return [int(value[key])]
+            heroes = []
+            for item in value.values():
+                heroes.extend(self._extract_hero_ids(item))
+            return heroes
+        if isinstance(value, (list, tuple)):
+            heroes = []
+            for item in value:
+                heroes.extend(self._extract_hero_ids(item))
+            return heroes
+        try:
+            hero_id = int(value)
+        except (TypeError, ValueError):
+            return []
+        return [hero_id] if hero_id in GameConfig.HERO_IDS else []
 
     def _default_summoner_skill(self, my_hero, opponent_hero):
         # Eval / match always uses the configured default (currently 80110 狂暴).
@@ -266,6 +325,8 @@ class Agent(BaseAgent):
         self.force_home_start_count = 0
         self.force_home_retreat_count = 0
         self.force_home_return_count = 0
+        self.force_home_post_kill_no_enemy_minion_visible_count = 0
+        self.force_home_post_kill_own_wave_confirm_count = 0
         self.opening_unstuck_count = 0
         self.opening_unstuck_last_pos = None
         self.opening_unstuck_last_frame = None
@@ -278,6 +339,8 @@ class Agent(BaseAgent):
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
         self._pending_cleanse_frame = None
+        self._cleanse_retry_until_frame = None
+        self._cleanse_retry_hit_frame = None
         self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
@@ -392,23 +455,65 @@ class Agent(BaseAgent):
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if self._hero_config_id(main_hero) != 112 or enemy_hero is None:
             return
-        if self._distance_between_heroes(main_hero, enemy_hero) > GameConfig.LUBAN_SKILL1_AIM_RANGE:
+        if not self._visible_to_own_camp(enemy_hero):
+            return
+        distance = self._distance_between_heroes(main_hero, enemy_hero)
+        if distance > GameConfig.LUBAN_SKILL1_AIM_RANGE:
             return
 
-        center = int(GameConfig.LUBAN_SKILL1_AIM_CENTER)
+        aim = self._luban_skill1_preferred_aim(observation, main_hero, enemy_hero)
+        if aim is None:
+            return
+        skill_x, skill_z, target = aim
+        legalized_action = self._legalized_rule_action(
+            observation,
+            [4, action[1], action[2], skill_x, skill_z, target],
+            active_heads=(3, 4),
+        )
+        if legalized_action is None:
+            return
+        skill_x, skill_z = legalized_action[3], legalized_action[4]
         target = int(GameConfig.LUBAN_SKILL1_AIM_TARGET)
-        if not self._is_luban_skill1_aim_legal(observation, center, target):
+        if not self._is_luban_skill1_aim_legal(observation, skill_x, skill_z, target):
             return
 
-        action[3] = center
-        action[4] = center
+        action[3] = skill_x
+        action[4] = skill_z
         action[5] = target
         setattr(act_data, attr, action)
         self.rule_override_active = True
         self.rule_override_count += 1
         self.luban_skill1_aim_assist_count += 1
 
-    def _is_luban_skill1_aim_legal(self, observation, center, target):
+    def _luban_skill1_preferred_aim(self, observation, main_hero, enemy_hero):
+        main_loc = self._hero_location(main_hero)
+        enemy_loc = self._hero_location(enemy_hero)
+        if main_loc is None or enemy_loc is None:
+            return None
+
+        dx = float(enemy_loc[0]) - float(main_loc[0])
+        dz = float(enemy_loc[1]) - float(main_loc[1])
+        scale = max(abs(dx), abs(dz))
+        skill_x = self._aim_axis_bucket(dx, scale, Config.LABEL_SIZE_LIST[3])
+        skill_z = self._aim_axis_bucket(dz, scale, Config.LABEL_SIZE_LIST[4])
+
+        return skill_x, skill_z, int(GameConfig.LUBAN_SKILL1_AIM_TARGET)
+
+    def _aim_axis_bucket(self, delta, scale, size):
+        center = int(GameConfig.LUBAN_SKILL1_AIM_CENTER)
+        min_bucket = int(getattr(GameConfig, "LUBAN_SKILL1_AIM_MIN_BUCKET", 0))
+        if size <= 0:
+            return center
+        if scale <= float(getattr(GameConfig, "LUBAN_SKILL1_AIM_DEADZONE", 0.0)):
+            return max(0, min(size - 1, center))
+        if delta >= 0:
+            span = max(1, (size - 1) - center)
+        else:
+            span = max(1, center - min_bucket)
+        bucket = int(round(center + (float(delta) / max(float(scale), 1.0)) * span))
+        return max(min_bucket, min(size - 1, bucket))
+
+    def _is_luban_skill1_aim_legal(self, observation, skill_x, skill_z, target):
         legal_action = observation.get("legal_action", [])
         if legal_action is None:
             legal_action = []
@@ -424,11 +529,13 @@ class Agent(BaseAgent):
             return False
         skill_x_offset = offsets[3]
         skill_z_offset = offsets[4]
-        if not (0 <= center < Config.LABEL_SIZE_LIST[3]):
+        if not (0 <= skill_x < Config.LABEL_SIZE_LIST[3]):
             return False
-        if int(legal_action[skill_x_offset + center] or 0) != 1:
+        if int(legal_action[skill_x_offset + skill_x] or 0) != 1:
             return False
-        if int(legal_action[skill_z_offset + center] or 0) != 1:
+        if not (0 <= skill_z < Config.LABEL_SIZE_LIST[4]):
+            return False
+        if int(legal_action[skill_z_offset + skill_z] or 0) != 1:
             return False
         target_offset = offsets[5]
         if len(legal_action) == Config.RAW_LEGAL_ACTION_DIM:
@@ -470,35 +577,63 @@ class Agent(BaseAgent):
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if main_hero is None or enemy_hero is None:
             self._pending_cleanse_frame = None
+            self._clear_cleanse_retry()
             return action
 
         if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
             self._pending_cleanse_frame = None
+            self._clear_cleanse_retry()
             return action
 
         frame_no = self._frame_no(frame_state)
-        pending_cleanse_frame = self._pending_cleanse_frame
-        if pending_cleanse_frame is not None and frame_no >= int(pending_cleanse_frame):
-            self._pending_cleanse_frame = None
-            if self._is_skill2_available(main_hero):
-                cleanse_action = self._legalized_rule_action(observation, [5, 15, 15, 15, 15, 2])
-                if cleanse_action is not None:
-                    self.rule_override_active = True
-                    self.cleanse_override_active = True
-                    self.rule_override_count += 1
-                    self.cleanse_override_count += 1
-                    return cleanse_action
+        hit, source = self._was_hit_by_enemy_ult(main_hero, enemy_hero, return_source=True)
+        if hit:
+            self._start_cleanse_retry(observation, main_hero, enemy_hero, frame_no, source)
+
+        retry_action = self._maybe_fire_cleanse_retry(observation, main_hero, enemy_hero, frame_no)
+        if retry_action is not None:
+            return retry_action
 
         fallback_action = self._maybe_force_cleanse_after_enemy_ult(observation, main_hero, frame_no)
         if fallback_action is not None:
             return fallback_action
 
-        if not self._was_hit_by_enemy_ult(main_hero, enemy_hero):
-            return action
-
-        if self._pending_cleanse_frame is None:
-            self._pending_cleanse_frame = frame_no + 1
         return action
+
+    def _start_cleanse_retry(self, observation, main_hero, enemy_hero, frame_no, source):
+        if self._cleanse_retry_until_frame is not None and frame_no <= int(self._cleanse_retry_until_frame):
+            return
+        window = int(GameConfig.DI_RENJIE_CLEANSE_RETRY_WINDOW)
+        self._cleanse_retry_hit_frame = frame_no
+        self._cleanse_retry_until_frame = frame_no + window
+        self._pending_cleanse_frame = None
+
+    def _clear_cleanse_retry(self):
+        self._cleanse_retry_until_frame = None
+        self._cleanse_retry_hit_frame = None
+
+    def _cleanse_retry_active(self, frame_no):
+        return self._cleanse_retry_until_frame is not None and int(frame_no or 0) <= int(
+            self._cleanse_retry_until_frame
+        )
+
+    def _maybe_fire_cleanse_retry(self, observation, main_hero, enemy_hero, frame_no):
+        if self._cleanse_retry_until_frame is None:
+            return None
+        if frame_no > int(self._cleanse_retry_until_frame):
+            self._clear_cleanse_retry()
+            return None
+        if not self._is_skill2_available(main_hero):
+            return None
+        cleanse_action = self._legalized_rule_action(observation, [5, 15, 15, 15, 15, 2])
+        if cleanse_action is None:
+            return None
+        self.rule_override_active = True
+        self.cleanse_override_active = True
+        self.rule_override_count += 1
+        self.cleanse_override_count += 1
+        self._clear_cleanse_retry()
+        return cleanse_action
 
     def _maybe_force_cleanse_after_enemy_ult(self, observation, main_hero, frame_no):
         last_cast = self._enemy_ult_cast_frame
@@ -596,10 +731,65 @@ class Agent(BaseAgent):
 
     def _prepare_policy_observation(self, observation):
         self._track_enemy_ult_cast(observation)
-        delay_observation = self._maybe_delay_cleanse_hit_frame(observation)
-        if delay_observation is not observation:
-            return delay_observation
-        return self._maybe_block_skill2(observation)
+        policy_observation = self._maybe_delay_cleanse_hit_frame(observation)
+        if policy_observation is observation:
+            policy_observation = self._maybe_block_skill2(observation)
+        final_observation = self._maybe_mask_direnjie_skill3_target(policy_observation)
+        return final_observation
+
+    def _maybe_mask_direnjie_skill3_target(self, observation):
+        frame_state = observation.get("frame_state", {}) or {}
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None or enemy_hero is None:
+            return observation
+        if self._hero_config_id(main_hero) != 133:
+            return observation
+        if self._unit_hp(enemy_hero) <= 0:
+            return observation
+
+        legal_action = observation.get("legal_action", [])
+        if legal_action is None:
+            return observation
+        if len(legal_action) != Config.RAW_LEGAL_ACTION_DIM:
+            return observation
+
+        button = 6
+        target_size = Config.LABEL_SIZE_LIST[-1]
+        if int(legal_action[button] or 0) != 1:
+            return observation
+
+        offsets = [0]
+        for size in Config.LABEL_SIZE_LIST[:-1]:
+            offsets.append(offsets[-1] + size)
+        target_offset = offsets[-1] + button * target_size
+        target_mask = legal_action[target_offset : target_offset + target_size]
+        if len(target_mask) != target_size or int(target_mask[1] or 0) != 1:
+            if hasattr(legal_action, "copy"):
+                masked_legal_action = legal_action.copy()
+            else:
+                masked_legal_action = list(legal_action)
+            masked_legal_action[button] = 0
+            masked_observation = dict(observation)
+            masked_observation["legal_action"] = masked_legal_action
+            return masked_observation
+        already_enemy_only = all(
+            (idx == 1 and int(value or 0) == 1) or (idx != 1 and int(value or 0) == 0)
+            for idx, value in enumerate(target_mask)
+        )
+        if already_enemy_only:
+            return observation
+
+        if hasattr(legal_action, "copy"):
+            masked_legal_action = legal_action.copy()
+        else:
+            masked_legal_action = list(legal_action)
+        for idx in range(target_size):
+            masked_legal_action[target_offset + idx] = 0
+        masked_legal_action[target_offset + 1] = 1
+
+        masked_observation = dict(observation)
+        masked_observation["legal_action"] = masked_legal_action
+        return masked_observation
 
     def _maybe_delay_cleanse_hit_frame(self, observation):
         frame_state = observation.get("frame_state", {}) or {}
@@ -608,13 +798,13 @@ class Agent(BaseAgent):
             return observation
         if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
             return observation
-        if not self._was_hit_by_enemy_ult(main_hero, enemy_hero):
+        hit, source = self._was_hit_by_enemy_ult(main_hero, enemy_hero, return_source=True)
+        if not hit:
             return observation
 
         frame_no = self._frame_no(frame_state)
-        if self._pending_cleanse_frame is None or frame_no >= int(self._pending_cleanse_frame):
-            self._pending_cleanse_frame = frame_no + 1
-        return self._mask_skill2_button(observation)
+        self._start_cleanse_retry(observation, main_hero, enemy_hero, frame_no, source)
+        return observation
 
     def _mask_skill2_button(self, observation):
         legal_action = observation.get("legal_action", [])
@@ -636,7 +826,7 @@ class Agent(BaseAgent):
         masked_observation["legal_action"] = masked_legal_action
         return masked_observation
 
-    def _was_hit_by_enemy_ult(self, main_hero, enemy_hero):
+    def _was_hit_by_enemy_ult(self, main_hero, enemy_hero, return_source=False):
         main_runtime = self._actor_runtime(main_hero)
         enemy_runtime = self._actor_runtime(enemy_hero)
         current_hit_times = self._slot_hit_hero_times(enemy_hero, 3)
@@ -648,7 +838,7 @@ class Agent(BaseAgent):
             slot = self._slot_idx(self._get_any(hurt, ["skillSlot", "skill_slot"], -1))
             if atker is not None and enemy_runtime is not None and str(atker) == str(enemy_runtime) and slot == 3:
                 self._prev_enemy_slot3_hit_hero_times = current_hit_times
-                return True
+                return (True, "take_hurt_infos") if return_source else True
         if main_runtime is not None:
             for hit in self._get_any(enemy_hero or {}, ["hit_target_info", "hitTargetInfo"], []) or []:
                 if not isinstance(hit, dict):
@@ -657,11 +847,13 @@ class Agent(BaseAgent):
                 slot = self._slot_idx(self._get_any(hit, ["slot_type", "slotType"], -1))
                 if target_runtime is not None and str(target_runtime) == str(main_runtime) and slot == 3:
                     self._prev_enemy_slot3_hit_hero_times = current_hit_times
-                    return True
+                    return (True, "hit_target_info") if return_source else True
         self._prev_enemy_slot3_hit_hero_times = current_hit_times
         if current_hit_times is None or previous_hit_times is None:
-            return False
-        return current_hit_times > previous_hit_times
+            return (False, "none") if return_source else False
+        hit = current_hit_times > previous_hit_times
+        source = "hitHeroTimes_delta" if hit else "none"
+        return (hit, source) if return_source else hit
 
     def _slot_hit_hero_times(self, hero, target_slot):
         values = []
@@ -722,14 +914,15 @@ class Agent(BaseAgent):
         enemy_level = int(self._get_any(enemy_hero, ["level"], 0) or 0)
         if enemy_level < 4:
             return False
-        last_cast = self._enemy_ult_cast_frame
         frame_no = self._frame_no(frame_state)
+        if self._cleanse_retry_active(frame_no):
+            return False
+        last_cast = self._enemy_ult_cast_frame
         if last_cast is None:
             return True
         elapsed = frame_no - int(last_cast)
-        unmask_start = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START)
         unmask_end = int(GameConfig.DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END)
-        return elapsed < unmask_start or elapsed > unmask_end
+        return elapsed > unmask_end
 
     def _track_skill2_action_stats(self, observation, action):
         action = self._normalize_action(action)
@@ -752,14 +945,59 @@ class Agent(BaseAgent):
         return actor.get("runtime_id") or actor.get("runtimeId")
 
     def _is_skill2_available(self, main_hero):
-        slots = self._slot_states(main_hero)
+        usable, cooldown = self._skill2_status(main_hero)
+        return usable and cooldown <= 0
+
+    def _skill2_status(self, main_hero):
+        status = self._skill_slot_debug(main_hero, 2)
+        return bool(status.get("usable", False)), float(status.get("cooldown", -1.0))
+
+    def _skill_slot_debug(self, hero, target_slot):
+        result = {
+            "usable": False,
+            "cooldown": -1.0,
+            "used_times": -1.0,
+            "succ": 0.0,
+            "hit_hero_times": None,
+            "level": -1,
+            "config_id": None,
+        }
+        slots = self._slot_states(hero)
         for slot in slots:
-            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != 2:
+            if self._slot_idx(self._get_any(slot, ["slot_type", "slotType"])) != target_slot:
                 continue
-            usable = bool(slot.get("usable", False))
-            cooldown = float(slot.get("cooldown", 0) or 0)
-            return usable and cooldown <= 0
-        return False
+            result["usable"] = bool(slot.get("usable", False))
+            result["cooldown"] = self._safe_float(self._get_any(slot, ["cooldown"], 0), 0.0)
+            result["used_times"] = self._safe_float(self._get_any(slot, ["usedTimes", "used_times"], -1), -1.0)
+            result["succ"] = self._safe_float(self._get_any(slot, ["succUsedInFrame", "succ_used_in_frame"], 0), 0.0)
+            result["hit_hero_times"] = self._safe_float(
+                self._get_any(slot, ["hitHeroTimes", "hit_hero_times"], 0),
+                0.0,
+            )
+            result["level"] = int(self._get_any(slot, ["level"], -1) or -1)
+            result["config_id"] = self._get_any(slot, ["configId", "config_id"], None)
+            return result
+        return result
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _legal_button_value(self, observation, button):
+        legal_action = observation.get("legal_action", []) if observation is not None else []
+        if legal_action is None:
+            return None
+        if hasattr(legal_action, "tolist"):
+            legal_action = legal_action.tolist()
+        button = int(button)
+        if button < 0 or button >= len(legal_action):
+            return None
+        try:
+            return int(legal_action[button] or 0)
+        except (TypeError, ValueError):
+            return None
 
     def _slot_succ_used(self, hero, target_slot):
         for slot in self._slot_states(hero):
@@ -932,7 +1170,7 @@ class Agent(BaseAgent):
             if target is None:
                 self._clear_force_home_phase(clear_camp=True)
                 return action
-            if self._own_perspective_lane(main_hero) >= GameConfig.FORCE_HOME_RETURN_EXIT_LANE:
+            if self._own_perspective_lane(main_hero) >= self._force_home_return_exit_lane():
                 self._clear_force_home_phase(clear_camp=True)
                 return action
             return self._force_walk_to(
@@ -989,7 +1227,7 @@ class Agent(BaseAgent):
     ):
         if self._hero_money_total(main_hero) >= GameConfig.FORCE_HOME_DISABLE_MONEY_TOTAL:
             return False
-        post_kill_lane_cleared = self._is_post_kill_lane_cleared(frame_no, frame_state)
+        post_kill_lane_cleared = self._is_post_kill_lane_cleared(frame_no, frame_state, record_debug=True)
         if main_tower is None:
             return False
         if not self._tower_hp_above(main_tower, GameConfig.FORCE_HOME_TOWER_HP_MIN):
@@ -1027,12 +1265,21 @@ class Agent(BaseAgent):
         last_kill_frame = int(getattr(self, "last_enemy_hero_kill_frame", -10000) or -10000)
         return 0 <= frame_no - last_kill_frame <= int(GameConfig.FORCE_HOME_POST_KILL_WINDOW_FRAMES)
 
-    def _is_post_kill_lane_cleared(self, frame_no, frame_state):
-        return self._in_post_kill_force_home_window(frame_no) and not self._enemy_minion_in_lane_range(
+    def _is_post_kill_lane_cleared(self, frame_no, frame_state, record_debug=False):
+        if not self._in_post_kill_force_home_window(frame_no):
+            return False
+        if self._enemy_minion_in_lane_range(
             frame_state,
             GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_LO,
             GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_HI,
-        )
+        ):
+            return False
+        if record_debug:
+            self.force_home_post_kill_no_enemy_minion_visible_count += 1
+        lane_confirmed = self._own_minion_wave_implies_post_kill_lane_cleared(frame_state)
+        if lane_confirmed and record_debug:
+            self.force_home_post_kill_own_wave_confirm_count += 1
+        return lane_confirmed
 
     def _tower_hp_above(self, tower, threshold):
         return self._unit_hp_rate(tower) > float(threshold)
@@ -1103,6 +1350,23 @@ class Agent(BaseAgent):
                 return True
         return False
 
+    def _own_minion_wave_implies_post_kill_lane_cleared(self, frame_state):
+        own_lanes = []
+        lane_lo = float(GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_LO)
+        lane_hi = float(GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_HI)
+        for npc in frame_state.get("npc_states", []) or []:
+            if not self._is_own_minion(npc):
+                continue
+            pos = self._project_own_perspective(npc)
+            if pos is None:
+                continue
+            lane = float(pos[0])
+            if lane_lo <= lane <= lane_hi:
+                own_lanes.append(lane)
+        if not own_lanes:
+            return True
+        return max(own_lanes) >= float(GameConfig.FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE)
+
     def _is_enemy_minion(self, npc):
         if npc is None or self._unit_hp(npc) <= 0:
             return False
@@ -1112,6 +1376,16 @@ class Agent(BaseAgent):
         main_camp = self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp)
         npc_camp = self._camp_key(npc.get("camp"))
         return main_camp in (1, 2) and npc_camp in (1, 2) and npc_camp != main_camp
+
+    def _is_own_minion(self, npc):
+        if npc is None or self._unit_hp(npc) <= 0:
+            return False
+        sub_type = self._actor_sub_type(npc)
+        if sub_type not in SOLDIER_SUB_TYPES:
+            return False
+        main_camp = self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp)
+        npc_camp = self._camp_key(npc.get("camp"))
+        return main_camp in (1, 2) and npc_camp == main_camp
 
     def _actor_sub_type(self, actor):
         actor_state = self._get_any(actor or {}, ["actor_state", "actorState"], {}) or {}
@@ -1161,6 +1435,18 @@ class Agent(BaseAgent):
         self.force_home_progress_best_dist = None
         self.force_home_stuck_frames = 0
 
+    def _force_home_return_exit_lane(self):
+        anchor = self._cake_anchor(False)
+        if anchor is None:
+            return float(GameConfig.FORCE_HOME_RETURN_EXIT_LANE)
+        return float(anchor[0])
+
+    def _force_home_path_valid_exit_lane(self):
+        anchor = self._cake_anchor(False)
+        if anchor is None:
+            return float(GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE)
+        return float(anchor[0])
+
     def _record_force_home_path(self, main_hero, frame_no):
         if self.force_home_phase is not None or self.force_home_path_ready:
             return
@@ -1176,7 +1462,8 @@ class Agent(BaseAgent):
         if pos is None:
             return
         points = list(self.force_home_path_points)
-        crossed_return_lane = bool(points) and points[-1][0] < GameConfig.FORCE_HOME_RETURN_EXIT_LANE <= pos[0]
+        return_exit_lane = self._force_home_return_exit_lane()
+        crossed_return_lane = bool(points) and points[-1][0] < return_exit_lane <= pos[0]
         turn_point = self._is_force_home_turn_point(points, pos)
         if (
             not points
@@ -1186,7 +1473,7 @@ class Agent(BaseAgent):
         ):
             points.append((float(pos[0]), float(pos[1])))
             self.force_home_path_points = self._compress_force_home_path(points)
-        if pos[0] >= GameConfig.FORCE_HOME_RETURN_EXIT_LANE:
+        if pos[0] >= return_exit_lane:
             self.force_home_path_ready = self._is_force_home_path_valid()
 
     def _compress_force_home_path(self, points):
@@ -1218,7 +1505,7 @@ class Agent(BaseAgent):
             cos_value = (v1[0] * v2[0] + v1[1] * v2[1]) / denom
             turn_score = max(0.0, 1.0 - cos_value) * 5000.0
         lane_score = 0.0
-        exit_lane = GameConfig.FORCE_HOME_RETURN_EXIT_LANE
+        exit_lane = self._force_home_return_exit_lane()
         if prev_point[0] < exit_lane <= point[0] or abs(point[0] - exit_lane) <= GameConfig.FORCE_HOME_PATH_MIN_DISTANCE:
             lane_score = 100000.0
         return lane_score + turn_score + min(prev_dist, next_dist)
@@ -1248,7 +1535,7 @@ class Agent(BaseAgent):
         last_lane = float(points[-1][0])
         if first_lane > -30000.0:
             return False
-        if last_lane < GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE:
+        if last_lane < self._force_home_path_valid_exit_lane():
             return False
         return last_lane - first_lane >= 12000.0
 

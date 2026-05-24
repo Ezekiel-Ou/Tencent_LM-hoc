@@ -24,12 +24,14 @@ SKILL_HIT_HERO_REWARD_KEYS = {
 SKILL_HIT_REWARD_KEYS = set(SKILL_HIT_HERO_REWARD_KEYS.values()) | {
     "luban_skill1_hit_enemy_soldier",
     "direnjie_skill3_followup_damage",
+    "direnjie_skill3_miss",
 }
 SCENARIO_REWARD_KEYS = {
     "minion_tower_push",
     "enemy_dead_enemy_cake",
     "enemy_minion_tower_front",
     "enemy_minion_under_own_tower",
+    "river_crab_pressure",
 }
 
 
@@ -133,6 +135,8 @@ class GameRewardManager:
         self.pending_direnjie_skill3_followup_frame = None
         self.pending_direnjie_skill3_followup_count = 0
         self._direnjie_skill3_followup_count_value = 0.0
+        self.pending_direnjie_skill3_miss_frame = None
+        self._direnjie_skill3_miss_count_value = 0.0
         # Cake pickup detection: track cake positions and main hero HP from previous frame.
         self.prev_cake_locs = set()
         self.prev_main_hp = None
@@ -156,6 +160,7 @@ class GameRewardManager:
         self._enemy_dead_enemy_cake_value = 0.0
         self._enemy_minion_tower_front_value = 0.0
         self._enemy_minion_under_own_tower_value = 0.0
+        self._river_crab_pressure_value = 0.0
         self._prev_enemy_tower_hp_for_push = None
         self._prev_main_enemy_tower_dist = None
         self._last_tower_push_eval_frame = -10000
@@ -163,8 +168,13 @@ class GameRewardManager:
         self._last_enemy_dead_cake_eval_frame = -10000
         self._last_enemy_minion_defense_eval_frame = -10000
         self._enemy_minion_defense_debug = self._empty_enemy_minion_defense_debug()
+        self._last_river_crab_pressure_frame = -10000
+        self._river_crab_pressure_total = 0.0
+        self._river_crab_pressure_debug = self._empty_river_crab_pressure_debug()
+        self.prev_river_crab_hp = {}
         self._prev_enemy_dead_cnt_for_reward = 0
         self._last_enemy_hero_dead_frame_for_reward = -10000
+        self._last_forward_stage = None
         self.init_max_exp_of_each_hero()
 
     def init_max_exp_of_each_hero(self):
@@ -228,7 +238,7 @@ class GameRewardManager:
             elif reward_name == "exp":
                 reward_struct.cur_frame_value = self.calculate_exp_sum(main_hero)
             elif reward_name == "forward":
-                reward_struct.cur_frame_value = self.calculate_forward(main_hero, main_tower, enemy_tower)
+                reward_struct.cur_frame_value = self.calculate_forward(main_hero, frame_data)
             elif reward_name == "cleanse_success":
                 if calc_frame_map is self.m_main_calc_frame_map:
                     reward_struct.cur_frame_value = float(
@@ -289,6 +299,11 @@ class GameRewardManager:
                     reward_struct.cur_frame_value = float(self._enemy_minion_under_own_tower_value)
                 else:
                     reward_struct.cur_frame_value = 0.0
+            elif reward_name == "river_crab_pressure":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._river_crab_pressure_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
             elif reward_name in ("win", "no_op_streak_penalty"):
                 reward_struct.cur_frame_value = 0.0
 
@@ -300,19 +315,68 @@ class GameRewardManager:
         exp_sum += _get(hero, "exp", 0)
         return exp_sum
 
-    def calculate_forward(self, main_hero, main_tower, enemy_tower):
-        if main_hero is None or main_tower is None or enemy_tower is None:
+    def calculate_forward(self, main_hero, frame_data=None):
+        if main_hero is None:
             return 0.0
         hp_rate = _hp_rate(main_hero)
         if hp_rate <= 0.0:
             return 0.0
-        main_tower_pos = _loc(main_tower)
-        enemy_tower_pos = _loc(enemy_tower)
-        hero_pos = _loc(main_hero)
-        dist_hero2enemy = math.dist(hero_pos, enemy_tower_pos)
-        dist_main2enemy = max(math.dist(main_tower_pos, enemy_tower_pos), 1.0)
-        progress = 1.0 - dist_hero2enemy / dist_main2enemy
-        return max(min(progress, 1.0), -1.0)
+        frame_no = 0
+        if frame_data is not None:
+            frame_no = int(_get_any(frame_data, ["frame_no", "frameNo"], 0) or 0)
+        lane = self._own_perspective_lane(main_hero)
+        if lane is None:
+            return 0.0
+
+        stage = self._opening_forward_stage(frame_no)
+        if stage == "approach_tower":
+            return self._opening_target_score(lane, GameConfig.OPENING_TOWER_TARGET_LANE)
+        if stage == "hold_safe":
+            if lane <= 0.0:
+                return 0.0
+            penalty_ratio = min(lane / max(float(GameConfig.OPENING_ENEMY_HALF_PENALTY_SCALE), 1.0), 1.0)
+            return float(GameConfig.OPENING_ENEMY_HALF_PENALTY) * penalty_ratio
+        if stage == "approach_prewave":
+            if lane > 0.0:
+                penalty_ratio = min(lane / max(float(GameConfig.OPENING_ENEMY_HALF_PENALTY_SCALE), 1.0), 1.0)
+                return float(GameConfig.OPENING_ENEMY_HALF_PENALTY) * penalty_ratio
+            if lane >= float(GameConfig.OPENING_PREWAVE_TARGET_LANE):
+                return 0.0
+            return self._opening_target_score(lane, GameConfig.OPENING_PREWAVE_TARGET_LANE)
+        return 0.0
+
+    def _opening_target_score(self, lane, target_lane):
+        if abs(float(lane) - float(target_lane)) <= float(GameConfig.OPENING_TARGET_BAND):
+            return 0.0
+        score = -abs(float(lane) - float(target_lane)) / max(float(GameConfig.OPENING_APPROACH_SCALE), 1.0)
+        clip = float(GameConfig.OPENING_APPROACH_CLIP)
+        return max(min(score, clip), -clip)
+
+    def _opening_forward_stage(self, frame_no):
+        frame_no = int(frame_no or 0)
+        if frame_no < int(GameConfig.OPENING_TOWER_REACH_END_FRAME):
+            return "approach_tower"
+        if frame_no < int(GameConfig.OPENING_PREWAVE_ADVANCE_START_FRAME):
+            return "hold_safe"
+        if frame_no < int(GameConfig.OPENING_PREWAVE_END_FRAME):
+            return "approach_prewave"
+        return "off"
+
+    def _own_perspective_lane(self, unit):
+        collider = _get(unit or {}, "collider", {}) or {}
+        location = _get(collider, "location", None) or _get(unit or {}, "location", None)
+        if not location:
+            return None
+        try:
+            x = float(_get(location, "x", None))
+            z = float(_get(location, "z", None))
+        except (TypeError, ValueError):
+            return None
+        if abs(x) > Args.RAW_COORD_ABS_LIMIT or abs(z) > Args.RAW_COORD_ABS_LIMIT:
+            return None
+        if _camp_key(_get(unit or {}, "camp", None)) == 2:
+            x, z = -x, -z
+        return (x + z) / Args.SQRT2
 
     def frame_data_process(self, frame_data):
         main_camp, enemy_camp = -1, -1
@@ -347,6 +411,9 @@ class GameRewardManager:
         self._enemy_dead_enemy_cake_value = self._detect_enemy_dead_enemy_cake(
             frame_data, main_hero, enemy_hero, enemy_tower, own_soldiers_in_enemy_tower
         )
+        self._river_crab_pressure_value = self._detect_river_crab_pressure(
+            frame_data, main_hero, enemy_hero, main_tower, enemy_tower, own_soldiers_in_enemy_tower
+        )
         (
             self._enemy_minion_tower_front_value,
             self._enemy_minion_under_own_tower_value,
@@ -373,12 +440,19 @@ class GameRewardManager:
             elif reward_name == "exp" and main_hero is not None and _get(main_hero, "level", 1) >= 15:
                 reward_struct.value = 0.0
             elif reward_name == "forward":
-                reward_struct.value = (
-                    self.m_main_calc_frame_map[reward_name].cur_frame_value
-                    - self.m_main_calc_frame_map[reward_name].last_frame_value
-                )
-                if GameConfig.REMOVE_FORWARD_AFTER is not None and frame_no > GameConfig.REMOVE_FORWARD_AFTER:
+                stage = self._opening_forward_stage(frame_no)
+                if stage in ("approach_tower", "approach_prewave"):
+                    reward_struct.value = (
+                        self.m_main_calc_frame_map[reward_name].cur_frame_value
+                        - self.m_main_calc_frame_map[reward_name].last_frame_value
+                    )
+                    if self._last_forward_stage != stage:
+                        reward_struct.value = 0.0
+                elif stage == "hold_safe":
+                    reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
+                else:
                     reward_struct.value = 0.0
+                self._last_forward_stage = stage
             elif reward_name == "last_hit":
                 reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
             elif reward_name == "cleanse_success":
@@ -429,7 +503,9 @@ class GameRewardManager:
         reward_dict["enemy_cleansed_us_count"] = float(self._cleanse_enemy_count)
         reward_dict.update(self._duel_summoner_debug)
         reward_dict.update(self._enemy_minion_defense_debug)
+        reward_dict.update(self._river_crab_pressure_debug)
         reward_dict["direnjie_skill3_followup_count"] = float(self._direnjie_skill3_followup_count_value)
+        reward_dict["direnjie_skill3_miss_count"] = float(self._direnjie_skill3_miss_count_value)
         self.has_last_frame = True
         return reward_dict
 
@@ -566,6 +642,11 @@ class GameRewardManager:
             "enemy_minion_tower_front_count": 0.0,
             "enemy_minion_under_own_tower_count": 0.0,
             "enemy_minion_defense_multiplier": 1.0,
+        }
+
+    def _empty_river_crab_pressure_debug(self):
+        return {
+            "river_crab_pressure_count": 0.0,
         }
 
     def _actor_runtime(self, actor):
@@ -834,6 +915,8 @@ class GameRewardManager:
             self.slot3_armed["main"] = True
             self.slot3_credit_used["main"] = False
             self.slot3_armed_frame["main"] = frame_no
+            if self._is_direnjie(main_hero):
+                self.pending_direnjie_skill3_miss_frame = int(frame_no or 0)
         if self._is_luban(main_hero) and self._slot_succ_used(main_hero, 1):
             self.pending_luban_skill1_frame = frame_no
             context = self.last_luban_skill1_action_context or {}
@@ -864,6 +947,7 @@ class GameRewardManager:
         if hero_counts.get("direnjie_skill3_hit_enemy_hero", 0.0) > 0:
             self.pending_direnjie_skill3_followup_frame = frame_no
             self.pending_direnjie_skill3_followup_count = 0
+            self.pending_direnjie_skill3_miss_frame = None
 
         counts["luban_skill1_hit_enemy_soldier"] += self._detect_luban_skill1_soldier_hits(
             frame_data, main_hero, frame_no
@@ -871,6 +955,7 @@ class GameRewardManager:
         counts["direnjie_skill3_followup_damage"] += self._detect_direnjie_skill3_followup_damage(
             enemy_hero, main_hero, main_runtime, frame_no
         )
+        counts["direnjie_skill3_miss"] += self._detect_direnjie_skill3_miss(frame_no)
         return counts
 
     def _is_luban(self, hero):
@@ -1051,6 +1136,18 @@ class GameRewardManager:
         if self.main_total_hurt_to_hero_delta > 0:
             return True
         return False
+
+    def _detect_direnjie_skill3_miss(self, frame_no):
+        self._direnjie_skill3_miss_count_value = 0.0
+        if self.pending_direnjie_skill3_miss_frame is None:
+            return 0.0
+        cast_frame = int(self.pending_direnjie_skill3_miss_frame or 0)
+        elapsed = int(frame_no or 0) - cast_frame
+        if elapsed < int(GameConfig.DI_RENJIE_SKILL3_MISS_WINDOW):
+            return 0.0
+        self.pending_direnjie_skill3_miss_frame = None
+        self._direnjie_skill3_miss_count_value = 1.0
+        return 1.0
 
     def _compute_main_total_hurt_to_hero_delta(self, main_hero):
         if main_hero is None:
@@ -1290,8 +1387,9 @@ class GameRewardManager:
         return False
 
     def _unit_damaged_by_runtime(self, unit, runtime):
-        for hurt in _get(unit, "take_hurt_infos", []) or []:
-            if _get_any(hurt, ["atker", "attacker"], None) != runtime:
+        for hurt in _get_any(unit or {}, ["take_hurt_infos", "takeHurtInfos"], []) or []:
+            attacker = _get_any(hurt, ["atker", "attacker"], None)
+            if attacker is None or runtime is None or str(attacker) != str(runtime):
                 continue
             try:
                 if float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0) > 0:
@@ -1418,6 +1516,126 @@ class GameRewardManager:
         }
         return front_value, under_value
 
+    def _detect_river_crab_pressure(
+        self, frame_data, main_hero, enemy_hero, main_tower, enemy_tower, own_soldier_count
+    ):
+        self._river_crab_pressure_debug = self._empty_river_crab_pressure_debug()
+        frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)
+        current_hp = self._river_crab_hp_map(frame_data)
+        try:
+            if not self.has_last_frame:
+                self.prev_river_crab_hp = current_hp
+                return 0.0
+            if self._river_crab_pressure_total >= float(GameConfig.RIVER_CRAB_PRESSURE_CAP):
+                self.prev_river_crab_hp = current_hp
+                return 0.0
+            if frame_no - self._last_river_crab_pressure_frame < int(GameConfig.RIVER_CRAB_PRESSURE_EVAL_INTERVAL):
+                self.prev_river_crab_hp = current_hp
+                return 0.0
+            if not self._river_crab_safe_context(
+                frame_data, main_hero, enemy_hero, main_tower, enemy_tower, own_soldier_count
+            ):
+                self.prev_river_crab_hp = current_hp
+                return 0.0
+
+            main_runtime = self._actor_runtime(main_hero)
+            if main_runtime is None:
+                self.prev_river_crab_hp = current_hp
+                return 0.0
+            main_target = _get_any(main_hero or {}, ["attack_target", "attackTarget"], None)
+            for runtime, info in current_hp.items():
+                prev_info = self.prev_river_crab_hp.get(runtime, {})
+                prev_hp = prev_info.get("hp") if isinstance(prev_info, dict) else None
+                hp = float(info.get("hp", 0.0) or 0.0)
+                hp_drop = prev_hp is not None and hp < float(prev_hp)
+                direct_damage = self._unit_damaged_by_runtime(info.get("unit"), main_runtime)
+                target_damage = hp_drop and main_target is not None and str(main_target) == str(runtime)
+                if not (direct_damage or target_damage):
+                    continue
+                value = min(
+                    float(GameConfig.RIVER_CRAB_PRESSURE_REWARD),
+                    float(GameConfig.RIVER_CRAB_PRESSURE_CAP) - float(self._river_crab_pressure_total),
+                )
+                if value <= 0.0:
+                    break
+                self._river_crab_pressure_total += value
+                self._last_river_crab_pressure_frame = frame_no
+                self._river_crab_pressure_debug["river_crab_pressure_count"] = 1.0
+                return value
+            return 0.0
+        finally:
+            self.prev_river_crab_hp = current_hp
+
+    def _river_crab_safe_context(
+        self, frame_data, main_hero, enemy_hero, main_tower, enemy_tower, own_soldier_count
+    ):
+        if main_hero is None or main_tower is None or enemy_tower is None:
+            return False
+        if float(_hp(main_hero) or 0) <= 0:
+            return False
+        if own_soldier_count > 0:
+            return False
+        if not self._enemy_hero_far_from_main(main_hero, enemy_hero):
+            return False
+        return not self._has_enemy_soldier_between_towers(frame_data, main_hero, main_tower, enemy_tower)
+
+    def _river_crab_hp_map(self, frame_data):
+        current = {}
+        for npc in frame_data.get("npc_states", []) or []:
+            if not self._is_river_crab(npc):
+                continue
+            runtime = self._actor_runtime(npc)
+            if runtime is None:
+                continue
+            current[runtime] = {
+                "hp": float(_hp(npc) or 0.0),
+                "unit": npc,
+            }
+        return current
+
+    def _is_river_crab(self, unit):
+        try:
+            config_id = int(_get_any(unit or {}, ["config_id", "configId"], 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return config_id in set(int(value) for value in GameConfig.RIVER_CRAB_CONFIG_IDS)
+
+    def _enemy_hero_far_from_main(self, main_hero, enemy_hero):
+        if enemy_hero is None or float(_hp(enemy_hero) or 0) <= 0:
+            return True
+        dist = self._distance_to_entity(main_hero, enemy_hero)
+        return dist is not None and dist > float(GameConfig.RIVER_CRAB_HERO_SAFE_RANGE)
+
+    def _has_enemy_soldier_between_towers(self, frame_data, main_hero, main_tower, enemy_tower):
+        main_camp = _camp_key(_get(main_hero or {}, "camp", None))
+        main_tower_lane = self._lane_for_camp(main_tower, main_camp)
+        enemy_tower_lane = self._lane_for_camp(enemy_tower, main_camp)
+        if main_tower_lane is None or enemy_tower_lane is None:
+            return True
+        lo, hi = sorted((main_tower_lane, enemy_tower_lane))
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == main_camp:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            lane = self._lane_for_camp(npc, main_camp)
+            if lane is None:
+                return True
+            if lo <= lane <= hi:
+                return True
+        return False
+
+    def _lane_for_camp(self, unit, camp):
+        pos = self._entity_pos(unit)
+        if pos is None:
+            return None
+        x, z = pos
+        if _camp_key(camp) == 2:
+            x, z = -x, -z
+        return (x + z) / Args.SQRT2
+
     def _enemy_minion_defense_multiplier(self, main_tower):
         hp_rate = _hp_rate(main_tower or {})
         if 0.0 < hp_rate < GameConfig.ENEMY_MINION_DEFENSE_TOWER_HP_LOW:
@@ -1454,6 +1672,8 @@ class GameRewardManager:
             return False
         if own_soldier_count < GameConfig.TOWER_PUSH_MIN_SOLDIERS:
             return False
+        if self._tower_targets_main_hero(main_hero, enemy_tower):
+            return False
         return self._is_enemy_dead(enemy_hero) or self._is_enemy_far_from_tower(enemy_hero, enemy_tower)
 
     def _is_actively_pushing_tower(self, frame_data, main_hero, enemy_tower, current_hp, prev_hp):
@@ -1473,6 +1693,11 @@ class GameRewardManager:
         if math.dist(main_pos, tower_pos) > attack_range:
             return False
         return self._tower_targets_own_soldier(frame_data, main_hero, enemy_tower)
+
+    def _tower_targets_main_hero(self, main_hero, tower):
+        main_runtime = self._actor_runtime(main_hero)
+        target_runtime = _get(tower or {}, "attack_target", None)
+        return main_runtime is not None and target_runtime is not None and str(main_runtime) == str(target_runtime)
 
     def _own_soldiers_in_enemy_tower_range(self, frame_data, main_hero, enemy_tower):
         if main_hero is None or enemy_tower is None:

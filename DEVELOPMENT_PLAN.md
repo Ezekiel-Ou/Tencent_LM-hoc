@@ -673,3 +673,30 @@
 
 - Hardened the hero grass-state feature to read both `is_in_grass` and `isInGrass` without changing the frozen feature layout.
 - Validation: `python -m py_compile agent_diy\feature\feature_process.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probe confirmed snake-case and camel-case grass fields both set hero offset `518`.
+
+### 11.63 2026-05-23 formal init_config summoner fix
+
+- Fixed formal evaluation summoner selection: if the platform calls `init_config()` without an explicit `is_eval` flag, the agent now treats it as formal eval/exam and uses `SUMMONER_SKILL_MATCHUP_WINRATE` instead of train-time cycling.
+- Added robust parsing for official-style `lineups` inputs and list-like `[my_hero, opponent_hero]` inputs. Official-style calls return a single summoner skill ID; local workflow calls with `my_heroes/opponent_heroes` keep returning the existing `{hero_id: skill_id}` dict.
+- Training workflow behavior is unchanged because it explicitly passes `is_eval=False`; train-time eval behavior is unchanged when workflow passes `forced_summoner_skill`.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; targeted probes covered formal dict/list/lineups calls for all four matchups, explicit train sampling, and forced eval skill override.
+
+### 11.64 2026-05-24 133v133 formal summoner default
+
+- Changed the formal eval/exam matchup table so `133v133` prefers `80110` instead of `80121`. Current formal defaults are `112v112 -> 80121`, `112v133 -> 80121`, `133v112 -> 80110`, and `133v133 -> 80110`.
+- Rechecked the previous all-berserk failure mode: v3.5 defaulted missing `is_eval` to train mode, whose first cycle candidate is `80110`; the fixed path now treats missing `is_eval` as formal eval/exam.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; targeted probes covered local dict, official `lineups` blue/red camp, list-style formal calls, explicit training cycle, and forced eval override.
+
+### 11.64 2026-05-24 opening lane-control reward
+
+- Changed force-home path recording from `600` to `450` frames and moved valid/return exit from first-tower lane to the camp-aware own health-cake lane, so the rule returns only to the safe cake area before handing control back to the policy.
+- Reworked the existing `forward` reward key into opening lane-control shaping: `0-450` frames rewards progress toward own tower lane, `450-750` frames only penalizes entering enemy half (`lane > 0`), `750-840` frames rewards lagging heroes for progress toward `lane=-9000` only while still behind that lane, and `840+` frames returns zero.
+- Set the enemy-half pre-wave penalty to `-0.25` over a `6000` lane scale, giving a maximum weighted penalty of about `-0.025` with the current `forward` weight.
+- The reward now uses own-perspective projected lane from hero coordinates and no longer depends on enemy tower visibility for opening movement shaping.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\agent.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted reward probe confirmed approach-to-tower positive delta, enemy-half penalty, own-half zero hold, approach-to-`-9000` positive delta only when behind the target lane, and post-840 zero.
+
+### 11.65 2026-05-24 river crab pressure reward
+
+- Added a small `river_crab_pressure` scenario reward for damaging river crab (`config_id=6827`) only when enemy heroes are farther than `9000`, no enemy minion is between the two towers, and no allied minion is inside enemy tower range.
+- The reward is `+0.02` per valid damage frame, has a `5`-frame interval gate, and is capped at `+0.4` per episode; it is monitored by `reward_river_crab_pressure` and `river_crab_pressure_count`.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted reward probe confirmed safe river-crab damage gives `+0.02` and enemy-near, enemy-minion-between-towers, allied-minion-under-enemy-tower, and no-damage cases give `0`.
