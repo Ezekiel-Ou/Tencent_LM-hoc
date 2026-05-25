@@ -83,6 +83,17 @@ def _hp_rate(unit, default=0.0):
     return _safe_div(_hp(unit), _max_hp(unit), default)
 
 
+def _tower_hp_reward_value(tower):
+    hp_rate = min(max(_hp_rate(tower or {}), 0.0), 1.0)
+    threshold = float(GameConfig.TOWER_HP_LOW_SHAPING_THRESHOLD)
+    low_total = float(GameConfig.TOWER_HP_LOW_SHAPING_TOTAL)
+    power = float(GameConfig.TOWER_HP_LOW_SHAPING_POWER)
+    if hp_rate >= threshold:
+        return hp_rate
+    damage_progress = (threshold - hp_rate) / threshold
+    return threshold - low_total * math.pow(damage_progress, power)
+
+
 def _loc(obj):
     collider = _get(obj or {}, "collider", {}) or {}
     location = _get(collider, "location", None) or _get(obj or {}, "location", {}) or {}
@@ -229,7 +240,7 @@ class GameRewardManager:
             elif reward_name == "death":
                 reward_struct.cur_frame_value = _get(main_hero, "dead_cnt", 0)
             elif reward_name == "tower_hp_point":
-                reward_struct.cur_frame_value = _hp_rate(main_tower or {})
+                reward_struct.cur_frame_value = _tower_hp_reward_value(main_tower)
             elif reward_name == "last_hit":
                 last_hit_value, last_hit_debug = self._count_last_hit(frame_data, main_hero, enemy_hero)
                 reward_struct.cur_frame_value = last_hit_value
@@ -328,39 +339,90 @@ class GameRewardManager:
         if lane is None:
             return 0.0
 
-        stage = self._opening_forward_stage(frame_no)
-        if stage == "approach_tower":
-            return self._opening_target_score(lane, GameConfig.OPENING_TOWER_TARGET_LANE)
-        if stage == "hold_safe":
-            if lane <= 0.0:
-                return 0.0
-            penalty_ratio = min(lane / max(float(GameConfig.OPENING_ENEMY_HALF_PENALTY_SCALE), 1.0), 1.0)
-            return float(GameConfig.OPENING_ENEMY_HALF_PENALTY) * penalty_ratio
-        if stage == "approach_prewave":
-            if lane > 0.0:
-                penalty_ratio = min(lane / max(float(GameConfig.OPENING_ENEMY_HALF_PENALTY_SCALE), 1.0), 1.0)
-                return float(GameConfig.OPENING_ENEMY_HALF_PENALTY) * penalty_ratio
-            if lane >= float(GameConfig.OPENING_PREWAVE_TARGET_LANE):
-                return 0.0
-            return self._opening_target_score(lane, GameConfig.OPENING_PREWAVE_TARGET_LANE)
-        return 0.0
-
-    def _opening_target_score(self, lane, target_lane):
-        if abs(float(lane) - float(target_lane)) <= float(GameConfig.OPENING_TARGET_BAND):
+        if self._opening_enemy_contact(frame_data, main_hero):
             return 0.0
-        score = -abs(float(lane) - float(target_lane)) / max(float(GameConfig.OPENING_APPROACH_SCALE), 1.0)
-        clip = float(GameConfig.OPENING_APPROACH_CLIP)
-        return max(min(score, clip), -clip)
+
+        target = self._opening_forward_target(frame_data, frame_no, main_hero)
+        if target is None:
+            return 0.0
+        target_lane, target_width = target
+        width = self._own_perspective_width(main_hero)
+        if width is None:
+            return 0.0
+        return self._opening_position_score(lane, width, target_lane, target_width)
+
+    def _enemy_hero_visible_to_main(self, frame_data, main_hero):
+        if frame_data is None or main_hero is None:
+            return False
+        main_camp = _camp_key(_get(main_hero or {}, "camp", self.main_hero_camp))
+        enemy_hero = None
+        for hero in frame_data.get("hero_states", []) or []:
+            if hero is main_hero:
+                continue
+            if _camp_key(_get(hero, "camp", None)) != main_camp:
+                enemy_hero = hero
+                break
+        if enemy_hero is None:
+            return False
+        camp_visible = _get_any(enemy_hero, ["camp_visible", "campVisible"], None)
+        if isinstance(camp_visible, (list, tuple)):
+            visible_idx = int(main_camp or 0) - 1
+            if 0 <= visible_idx < len(camp_visible):
+                return bool(camp_visible[visible_idx])
+        return True
+
+    def _opening_position_score(self, lane, width, target_lane, target_width):
+        lane_error = max(0.0, abs(float(lane) - float(target_lane)) - float(GameConfig.OPENING_TARGET_BAND))
+        width_error = (
+            0.0
+            if target_width is None
+            else max(0.0, abs(float(width) - float(target_width)) - float(GameConfig.OPENING_WIDTH_BAND))
+        )
+        score = -(
+            lane_error / max(float(GameConfig.OPENING_LANE_SCALE), 1.0)
+            + width_error / max(float(GameConfig.OPENING_WIDTH_SCALE), 1.0)
+        )
+        clip = float(GameConfig.OPENING_POSITION_CLIP)
+        return max(min(score, 0.0), -clip)
 
     def _opening_forward_stage(self, frame_no):
         frame_no = int(frame_no or 0)
-        if frame_no < int(GameConfig.OPENING_TOWER_REACH_END_FRAME):
+        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_START_FRAME):
             return "approach_tower"
-        if frame_no < int(GameConfig.OPENING_PREWAVE_ADVANCE_START_FRAME):
-            return "hold_safe"
-        if frame_no < int(GameConfig.OPENING_PREWAVE_END_FRAME):
-            return "approach_prewave"
+        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_FOLLOW_FRAME):
+            return "wait_tower"
+        if frame_no < int(GameConfig.OPENING_FORWARD_END_FRAME):
+            return "follow_wave"
         return "off"
+
+    def _opening_forward_target(self, frame_data, frame_no, main_hero):
+        stage = self._opening_forward_stage(frame_no)
+        if stage == "approach_tower":
+            return (
+                float(GameConfig.OPENING_TOWER_TARGET_LANE),
+                self._opening_approach_target_width(main_hero),
+            )
+        if stage == "wait_tower":
+            return (
+                float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
+                float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
+            )
+        if stage == "follow_wave":
+            front_minion = self._front_own_minion(frame_data)
+            if front_minion is None:
+                target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+            else:
+                front_lane = self._own_perspective_lane(front_minion)
+                target_lane = (
+                    float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+                    if front_lane is None
+                    else float(front_lane) - float(GameConfig.OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE)
+                )
+            return (
+                target_lane,
+                float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
+            )
+        return None
 
     def _own_perspective_lane(self, unit):
         collider = _get(unit or {}, "collider", {}) or {}
@@ -377,6 +439,77 @@ class GameRewardManager:
         if _camp_key(_get(unit or {}, "camp", None)) == 2:
             x, z = -x, -z
         return (x + z) / Args.SQRT2
+
+    def _own_perspective_width(self, unit):
+        collider = _get(unit or {}, "collider", {}) or {}
+        location = _get(collider, "location", None) or _get(unit or {}, "location", None)
+        if not location:
+            return None
+        try:
+            x = float(_get(location, "x", None))
+            z = float(_get(location, "z", None))
+        except (TypeError, ValueError):
+            return None
+        if abs(x) > Args.RAW_COORD_ABS_LIMIT or abs(z) > Args.RAW_COORD_ABS_LIMIT:
+            return None
+        if _camp_key(_get(unit or {}, "camp", None)) == 2:
+            x, z = -x, -z
+        return (x - z) / Args.SQRT2
+
+    def _opening_approach_target_width(self, main_hero):
+        width = self._own_perspective_width(main_hero)
+        if width is None:
+            return None
+        width_limit = float(GameConfig.OPENING_WAVE_GUARD_APPROACH_WIDTH_LIMIT)
+        if abs(width) <= width_limit:
+            return None
+        return width_limit if width > 0 else -width_limit
+
+    def _opening_enemy_contact(self, frame_data, main_hero):
+        return self._enemy_hero_visible_to_main(frame_data, main_hero) or self._enemy_minion_visible_to_main(
+            frame_data, main_hero
+        )
+
+    def _enemy_minion_visible_to_main(self, frame_data, main_hero):
+        if frame_data is None or main_hero is None:
+            return False
+        main_camp = _camp_key(_get(main_hero or {}, "camp", self.main_hero_camp))
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if _camp_key(_get(npc, "camp", None)) == main_camp:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            camp_visible = _get_any(npc, ["camp_visible", "campVisible"], None)
+            if isinstance(camp_visible, (list, tuple)):
+                visible_idx = int(main_camp or 0) - 1
+                if 0 <= visible_idx < len(camp_visible):
+                    return bool(camp_visible[visible_idx])
+            return True
+        return False
+
+    def _front_own_minion(self, frame_data):
+        if frame_data is None:
+            return None
+        front_minion = None
+        front_lane = None
+        main_camp = _camp_key(getattr(self, "main_hero_camp", None))
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            npc_camp = _camp_key(_get(npc, "camp", None))
+            if main_camp in (1, 2) and npc_camp != main_camp:
+                continue
+            lane = self._own_perspective_lane(npc)
+            if lane is None:
+                continue
+            if front_lane is None or float(lane) > front_lane:
+                front_lane = float(lane)
+                front_minion = npc
+        return front_minion
 
     def frame_data_process(self, frame_data):
         main_camp, enemy_camp = -1, -1
@@ -441,14 +574,7 @@ class GameRewardManager:
                 reward_struct.value = 0.0
             elif reward_name == "forward":
                 stage = self._opening_forward_stage(frame_no)
-                if stage in ("approach_tower", "approach_prewave"):
-                    reward_struct.value = (
-                        self.m_main_calc_frame_map[reward_name].cur_frame_value
-                        - self.m_main_calc_frame_map[reward_name].last_frame_value
-                    )
-                    if self._last_forward_stage != stage:
-                        reward_struct.value = 0.0
-                elif stage == "hold_safe":
+                if stage in ("approach_tower", "wait_tower", "follow_wave"):
                     reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
                 else:
                     reward_struct.value = 0.0

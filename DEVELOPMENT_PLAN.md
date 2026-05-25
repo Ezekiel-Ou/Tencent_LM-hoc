@@ -700,3 +700,43 @@
 - Added a small `river_crab_pressure` scenario reward for damaging river crab (`config_id=6827`) only when enemy heroes are farther than `9000`, no enemy minion is between the two towers, and no allied minion is inside enemy tower range.
 - The reward is `+0.02` per valid damage frame, has a `5`-frame interval gate, and is capped at `+0.4` per episode; it is monitored by `reward_river_crab_pressure` and `river_crab_pressure_count`.
 - Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted reward probe confirmed safe river-crab damage gives `+0.02` and enemy-near, enemy-minion-between-towers, allied-minion-under-enemy-tower, and no-damage cases give `0`.
+
+### 11.66 2026-05-25 LSTM tail sample flush
+
+- Fixed `agent_diy` trajectory packing so each episode flushes the final partial `LSTM_TIME_STEPS=16` segment instead of dropping the last `1..15` frames. Tail samples are zero-padded to the existing fixed sample shape, with padded frames kept out of training through `is_train=0`.
+- Kept `Config.DATA_SPLIT_SHAPE`, `Config.SAMPLE_DIM`, model architecture, and checkpoint protocol unchanged, so existing checkpoints remain loadable and can continue training.
+- Validation: `python -m py_compile agent_diy\feature\definition.py agent_diy\conf\conf.py agent_diy\model\model.py agent_diy\algorithm\algorithm.py` passed; `Config.validate()` passed with `SAMPLE_DIM=81312`; targeted `FrameCollector` probe covered `1/15/16/17/31/32` frame episodes and confirmed tail sample counts plus padded `is_train=0`; a 15-frame tail sample completed one `Algorithm.learn` step with finite loss.
+
+### 11.67 2026-05-25 Luban skill-1 aim range trim
+
+- Reduced the rule-layer Luban skill-1 aim-assist trigger range from `16000` to `12000`, lowering the chance that the rule rewrites a valid skill-1 action toward a target beyond practical hit range.
+- Validation: `python -m py_compile agent_diy\conf\conf.py` passed; `Config.validate()` passed.
+
+### 11.68 2026-05-25 Luban skill-1 dead-target and red-side aim fix
+
+- Added a non-mutating enemy-death gate to Luban skill-1 aim assist, borrowing the force-home evidence stack without updating force-home counters: `dead_action`, `revive_time > 0`, or `hp <= 0` disables the rule.
+- Changed Luban skill-1 aim direction from raw `enemy_pos - self_pos` to own-perspective raw coordinates via `_own_raw_location`, matching the existing red/blue mirrored forced-move path and fixing red-side reversed aim.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted probes confirmed blue/red equivalent aim buckets match and dead/reviving enemies do not trigger action rewrite.
+
+### 11.69 2026-05-25 invisible-enemy opening pressure
+
+- Updated the `forward` opening lane-control reward for the `450-840` frame pre-wave window: if the enemy hero is not visible to our camp, positions beyond `lane=-6000` now receive a continuous penalty; if the enemy is visible, the stricter penalty remains only for entering enemy half (`lane>0`).
+- Kept the `750-840` lagging-hero reward toward `lane=-9000`; once the hero is already at or ahead of that lane, it no longer gets approach reward, and invisible-enemy overextension still takes precedence.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed blue/red symmetry, invisible-enemy penalty at `lane=-5000`, no penalty at `lane=-7000`, visible-enemy allowance at `lane=-5000`, and visible enemy-half penalty at `lane=1000`.
+
+### 11.70 2026-05-25 Luban skill-1 aim range tighten
+
+- Reduced the rule-layer Luban skill-1 aim-assist trigger range from `12000` to `10000`, keeping the dead-target and red-side direction fixes unchanged.
+- Validation: `python -m py_compile agent_diy\conf\conf.py` passed; `Config.validate()` passed.
+
+### 11.71 2026-05-25 low-HP tower reward shaping
+
+- Changed `tower_hp_point` current-frame value to stay linear above `50%` tower HP and use a convex low-HP curve below `50%`, so equal HP deltas become more valuable as the tower approaches `0%`. The `tower_hp_point` reward key, configured weight, monitor path, and zero-sum frame-difference path are unchanged.
+- This intentionally raises the full tower-destruction `tower_hp_point_origin` range from `1.0` to `1.5`: `100% -> 50%` contributes `0.5`, and the nonlinear `50% -> 0%` segment contributes `1.0`.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed interval rewards increase as tower HP drops: `60% -> 50% = 0.10`, `50% -> 40% = 0.133748`, `20% -> 10% = 0.228526`, `10% -> 0% = 0.243407`, and enemy tower `10% -> 0%` reward still flows through the zero-sum diff path.
+
+### 11.72 2026-05-25 force-home tower/minion gate
+
+- Changed the force-home start gate so own tower HP below `30%` blocks new force-home starts, while exactly `30%` is allowed by this gate.
+- Replaced the old own-tower-range enemy-minion check with a camp-aware own-perspective half-map check: any living enemy minion with `lane < 0` blocks force-home start.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted helper probe confirmed blue-side and red-side raw coordinates are both mapped to own-perspective `lane < 0` for the own-half enemy-minion gate.

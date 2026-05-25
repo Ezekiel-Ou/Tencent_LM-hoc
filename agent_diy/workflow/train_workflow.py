@@ -305,14 +305,14 @@ class EpisodeRunner:
                             monitor_data["force_home_return_count"] = float(
                                 getattr(self.agents[monitor_side], "force_home_return_count", 0)
                             )
-                            monitor_data["force_home_post_kill_no_enemy_minion_visible_count"] = float(
+                            monitor_data["force_home_no_emy_minion_cnt"] = float(
                                 getattr(
                                     self.agents[monitor_side],
                                     "force_home_post_kill_no_enemy_minion_visible_count",
                                     0,
                                 )
                             )
-                            monitor_data["force_home_post_kill_own_wave_confirm_count"] = float(
+                            monitor_data["force_home_own_wave_cnt"] = float(
                                 getattr(
                                     self.agents[monitor_side],
                                     "force_home_post_kill_own_wave_confirm_count",
@@ -343,7 +343,7 @@ class EpisodeRunner:
                                 )
                             )
                             self.monitor.put_data({os.getpid(): monitor_data})
-                            self.last_report_monitor_time = now
+                        self.last_report_monitor_time = now
 
                     if len(frame_collector) > 0 and not is_eval:
                         yield sample_process(frame_collector)

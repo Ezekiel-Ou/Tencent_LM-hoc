@@ -36,8 +36,8 @@ class GameConfig:
         133: DUEL_SUMMONER_SKILL_IDS.copy(),
     }
     SUMMONER_SKILL_MATCHUP_WINRATE = {
-        (112, 112): {80110: 0.95, 80121: 0.90},
-        (112, 133): {80110: 0.95, 80121: 0.90},
+        (112, 112): {80110: 0.85, 80121: 0.90},
+        (112, 133): {80110: 0.85, 80121: 0.90},
         (133, 112): {80110: 0.95, 80121: 0.90},
         (133, 133): {80110: 0.95, 80121: 0.90},
     }
@@ -117,20 +117,24 @@ class GameConfig:
         # Workflow-injected action penalty once no-op streak reaches threshold.
         "no_op_streak_penalty": 1.0,
     }
-    # Opening lane-control shaping. The key stays "forward" for checkpoint and
-    # monitor compatibility, but the signal is no longer "walk toward enemy
-    # tower": it only teaches first-wave timing.
-    OPENING_TOWER_REACH_END_FRAME = 450
-    OPENING_PREWAVE_ADVANCE_START_FRAME = 750
-    OPENING_PREWAVE_END_FRAME = 840
-    OPENING_TOWER_TARGET_LANE = -18384.78
-    OPENING_PREWAVE_TARGET_LANE = -9000.0
-    OPENING_TARGET_BAND = 2500.0
-    OPENING_APPROACH_SCALE = 50000.0
-    OPENING_APPROACH_CLIP = 1.0
-    OPENING_ENEMY_HALF_PENALTY_SCALE = 6000.0
-    OPENING_ENEMY_HALF_PENALTY = -0.25
-    REMOVE_FORWARD_AFTER = OPENING_PREWAVE_END_FRAME
+    # Keep tower HP reward linear above the threshold, then use a convex low-HP
+    # curve so equal HP deltas become more valuable as the tower approaches 0 HP.
+    # This intentionally increases the total tower-destruction reward while
+    # preserving the existing tower_hp_point key and diff path.
+    TOWER_HP_LOW_SHAPING_THRESHOLD = 0.50
+    TOWER_HP_LOW_SHAPING_TOTAL = 1.00
+    TOWER_HP_LOW_SHAPING_POWER = 1.25
+    # Opening lane-control shaping. This mirrors the opening wave guard:
+    # reach the first-tower area, wait at lane center, then follow our first
+    # wave from behind until enemy contact or timeout.
+    OPENING_FORWARD_END_FRAME = 840
+    OPENING_TOWER_TARGET_LANE = -18000.0
+    OPENING_TARGET_BAND = 1200.0
+    OPENING_WIDTH_BAND = 600.0
+    OPENING_LANE_SCALE = 30000.0
+    OPENING_WIDTH_SCALE = 10000.0
+    OPENING_POSITION_CLIP = 0.2
+    REMOVE_FORWARD_AFTER = OPENING_FORWARD_END_FRAME
     REWARD_DEBUG_KEY_LIST = [
         "cake_high_hp_penalty_count",
         "recover_attempt_count",
@@ -181,7 +185,7 @@ class GameConfig:
         "luban_skill1_aim_assist_count",
     ]
     LUBAN_SKILL1_AIM_ASSIST = True
-    LUBAN_SKILL1_AIM_RANGE = 16000.0
+    LUBAN_SKILL1_AIM_RANGE = 10000.0
     LUBAN_SKILL1_AIM_CENTER = 8
     LUBAN_SKILL1_AIM_TARGET = 2
     LUBAN_SKILL1_AIM_MIN_BUCKET = 1
@@ -191,7 +195,7 @@ class GameConfig:
     LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
     CLEANSE_WINDOW_FRAMES = 300
     DI_RENJIE_CLEANSE_RETRY_WINDOW = 20
-    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 12
+    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 15
     DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END = 420
     DI_RENJIE_SKILL3_MISS_WINDOW = 30
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW_EARLY = 60
@@ -259,29 +263,36 @@ class GameConfig:
     OPENING_UNSTUCK_MIN_MOVE = 30.0
     OPENING_UNSTUCK_COOLDOWN_FRAMES = 5
     OPENING_UNSTUCK_FORWARD_DELTA = 2000.0
+    OPENING_WAVE_GUARD_START_FRAME = 480
+    OPENING_WAVE_GUARD_FOLLOW_FRAME = 630
+    OPENING_WAVE_GUARD_END_FRAME = 840
+    OPENING_WAVE_GUARD_ACTIVATE_LANE = -18000.0
+    OPENING_WAVE_GUARD_WAIT_LANE = -16000.0
+    OPENING_WAVE_GUARD_TARGET_WIDTH = 0.0
+    OPENING_WAVE_GUARD_APPROACH_WIDTH_LIMIT = 4000.0
+    OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE = 1200.0
     FORCE_HOME_DISABLE_MONEY_TOTAL = 2900
     FORCE_HOME_HP_TRIGGER_PRE_CANNON = 0.20
     FORCE_HOME_HP_TRIGGER = 0.20
     FORCE_HOME_HP_RECOVERED = 0.70
-    FORCE_HOME_POST_KILL_HP_TRIGGER = 0.40
+    FORCE_HOME_POST_KILL_HP_TRIGGER = 0.50
     FORCE_HOME_POST_KILL_WINDOW_FRAMES = 900
     FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE = 6000.0
-    FORCE_HOME_TOWER_HP_MIN = 0.40
+    FORCE_HOME_TOWER_HP_MIN = 0.30
     FORCE_HOME_ENEMY_SAFE_RANGE = 10000.0
-    FORCE_HOME_TOWER_AREA_ENEMY_MINIONS_MAX = 0
+    FORCE_HOME_OWN_HALF_ENEMY_MINION_LANE_MAX = 0.0
     FORCE_HOME_ENEMY_DEAD_LANE_LO = -18384.78
     FORCE_HOME_ENEMY_DEAD_LANE_HI = 18384.78
     FORCE_HOME_DEEP_LANE = -30000.0
     FORCE_HOME_RECOVER_COOLDOWN_FRAMES = 120
     CAKE_PICKUP_PROXIMITY = 1500.0
-    # Fallback lanes for force-home path validation/return. Runtime logic uses
-    # the camp-aware own cake anchor when available, so forced return exits near
-    # the safe health-cake area instead of walking all the way to first tower.
-    FORCE_HOME_RETURN_EXIT_LANE = -21453.62
-    FORCE_HOME_PATH_VALID_EXIT_LANE = -21453.62
-    FORCE_HOME_PATH_RECORD_FRAMES = 450
+    FORCE_HOME_RETURN_EXIT_LANE = -18000.0
+    FORCE_HOME_PATH_VALID_EXIT_LANE = -18000.0
+    FORCE_HOME_PATH_RECORD_FRAMES = 600
     FORCE_HOME_PATH_MAX_POINTS = 24
     FORCE_HOME_PATH_MIN_POINTS = 5
+    FORCE_HOME_PATH_START_LANE_MAX = -30000.0
+    FORCE_HOME_PATH_MIN_SPAN = 12000.0
     FORCE_HOME_PATH_MIN_DISTANCE = 1200.0
     FORCE_HOME_PATH_TURN_COS = 0.85
     FORCE_HOME_PATH_TURN_MIN_DISTANCE = 500.0
@@ -628,6 +639,9 @@ class Config:
         assert cls.SAMPLE_DIM == sum(shape[0] for shape in cls.data_shapes)
         assert len(cls.TARGET_ORDER) == cls.LABEL_SIZE_LIST[-1]
         assert len(cls.BUTTON_LOGIT_BIAS) == cls.LABEL_SIZE_LIST[0]
+        assert 0.0 < GameConfig.TOWER_HP_LOW_SHAPING_THRESHOLD <= 1.0
+        assert GameConfig.TOWER_HP_LOW_SHAPING_TOTAL >= GameConfig.TOWER_HP_LOW_SHAPING_THRESHOLD
+        assert GameConfig.TOWER_HP_LOW_SHAPING_POWER > 1.0
 
     @classmethod
     def checkpoint_signature(cls):

@@ -124,6 +124,7 @@ class Agent(BaseAgent):
         self.force_home_path_camp = None
         self.force_home_path_points = []
         self.force_home_path_ready = False
+        self.force_home_path_closed = False
         self.force_home_path_index = None
         self.force_home_progress_phase = None
         self.force_home_progress_index = None
@@ -145,6 +146,15 @@ class Agent(BaseAgent):
         self.opening_unstuck_last_frame = None
         self.opening_unstuck_last_trigger_frame = -10000
         self.opening_unstuck_camp = None
+        self.opening_wave_guard_active = False
+        self.opening_wave_guard_done = False
+        self.opening_wave_guard_camp = None
+        self.opening_wave_guard_approach_count = 0
+        self.opening_wave_guard_wait_count = 0
+        self.opening_wave_guard_follow_count = 0
+        self.opening_wave_guard_exit_enemy_hero_count = 0
+        self.opening_wave_guard_exit_enemy_minion_count = 0
+        self.opening_wave_guard_exit_timeout_count = 0
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
@@ -311,6 +321,7 @@ class Agent(BaseAgent):
         self.force_home_path_camp = None
         self.force_home_path_points = []
         self.force_home_path_ready = False
+        self.force_home_path_closed = False
         self.force_home_path_index = None
         self.force_home_progress_phase = None
         self.force_home_progress_index = None
@@ -332,6 +343,15 @@ class Agent(BaseAgent):
         self.opening_unstuck_last_frame = None
         self.opening_unstuck_last_trigger_frame = -10000
         self.opening_unstuck_camp = None
+        self.opening_wave_guard_active = False
+        self.opening_wave_guard_done = False
+        self.opening_wave_guard_camp = None
+        self.opening_wave_guard_approach_count = 0
+        self.opening_wave_guard_wait_count = 0
+        self.opening_wave_guard_follow_count = 0
+        self.opening_wave_guard_exit_enemy_hero_count = 0
+        self.opening_wave_guard_exit_enemy_minion_count = 0
+        self.opening_wave_guard_exit_timeout_count = 0
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
@@ -399,6 +419,7 @@ class Agent(BaseAgent):
         action = self.action_process(observation, act_data, True)
         action = self._maybe_auto_cleanse(observation, action)
         action = self._maybe_opening_unstuck(observation, action)
+        action = self._maybe_opening_wave_guard(observation, action)
         action = self._maybe_force_home(observation, action)
         self._track_skill2_action_stats(observation, action)
         return action
@@ -414,6 +435,7 @@ class Agent(BaseAgent):
         action = self.action_process(observation, act_data, False)
         action = self._maybe_auto_cleanse(observation, action)
         action = self._maybe_opening_unstuck(observation, action)
+        action = self._maybe_opening_wave_guard(observation, action)
         action = self._maybe_force_home(observation, action)
         self._track_skill2_action_stats(observation, action)
         return action
@@ -452,8 +474,13 @@ class Agent(BaseAgent):
             return
 
         frame_state = observation.get("frame_state", {}) or {}
+        current_camp = self._resolve_current_camp(observation, frame_state)
+        if current_camp not in (1, 2):
+            return
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if self._hero_config_id(main_hero) != 112 or enemy_hero is None:
+            return
+        if self._enemy_hero_dead_for_action_rule(frame_state, enemy_hero):
             return
         if not self._visible_to_own_camp(enemy_hero):
             return
@@ -486,8 +513,8 @@ class Agent(BaseAgent):
         self.luban_skill1_aim_assist_count += 1
 
     def _luban_skill1_preferred_aim(self, observation, main_hero, enemy_hero):
-        main_loc = self._hero_location(main_hero)
-        enemy_loc = self._hero_location(enemy_hero)
+        main_loc = self._own_raw_location(main_hero)
+        enemy_loc = self._own_raw_location(enemy_hero)
         if main_loc is None or enemy_loc is None:
             return None
 
@@ -728,6 +755,145 @@ class Agent(BaseAgent):
         lane = float(projected_pos[0]) + float(GameConfig.OPENING_UNSTUCK_FORWARD_DELTA)
         width = float(projected_pos[1])
         return self._unproject_own_perspective((lane, width))
+
+    def _maybe_opening_wave_guard(self, observation, action):
+        if self.opening_wave_guard_done or self.cleanse_override_active:
+            return action
+
+        frame_state = observation.get("frame_state", {}) or {}
+        frame_no = self._frame_no(frame_state)
+        if frame_no > int(GameConfig.OPENING_WAVE_GUARD_END_FRAME):
+            self._finish_opening_wave_guard("timeout", frame_no)
+            return action
+
+        current_camp = self._resolve_current_camp(observation, frame_state)
+        if current_camp not in (1, 2):
+            self._reset_opening_wave_guard_track(clear_done=False)
+            return action
+        if self.opening_wave_guard_camp not in (None, current_camp):
+            self._reset_opening_wave_guard_track(clear_done=True)
+        self.opening_wave_guard_camp = current_camp
+
+        main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
+        if main_hero is None or self._unit_hp(main_hero) <= 0:
+            return action
+        if self._opening_enemy_hero_visible(enemy_hero):
+            self._finish_opening_wave_guard("enemy_hero", frame_no)
+            return action
+        if self._opening_enemy_minion_visible(frame_state):
+            self._finish_opening_wave_guard("enemy_minion", frame_no)
+            return action
+
+        pos = self._project_own_perspective(main_hero)
+        if pos is None:
+            return action
+        if frame_no >= int(GameConfig.OPENING_WAVE_GUARD_END_FRAME):
+            self._finish_opening_wave_guard("timeout", frame_no)
+            return action
+        if not self.opening_wave_guard_active:
+            if (
+                frame_no >= int(GameConfig.OPENING_WAVE_GUARD_START_FRAME)
+                and float(pos[0]) <= float(GameConfig.OPENING_WAVE_GUARD_ACTIVATE_LANE)
+            ):
+                return action
+            self.opening_wave_guard_active = True
+
+        target = self._opening_wave_guard_target(frame_state, frame_no, pos)
+        if target is None:
+            return action
+        move_action = self._move_action_towards(main_hero, target)
+        if move_action is None:
+            return action
+        legal_move = self._legalized_rule_action(observation, move_action, active_heads=(1, 2))
+        if legal_move is None:
+            return action
+
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_START_FRAME):
+            self.opening_wave_guard_approach_count += 1
+        elif frame_no < int(GameConfig.OPENING_WAVE_GUARD_FOLLOW_FRAME):
+            self.opening_wave_guard_wait_count += 1
+        else:
+            self.opening_wave_guard_follow_count += 1
+        return legal_move
+
+    def _reset_opening_wave_guard_track(self, clear_done=False):
+        self.opening_wave_guard_active = False
+        self.opening_wave_guard_camp = None
+        if clear_done:
+            self.opening_wave_guard_done = False
+
+    def _finish_opening_wave_guard(self, reason, frame_no=None):
+        if self.opening_wave_guard_done:
+            return
+        self.opening_wave_guard_done = True
+        if reason == "enemy_hero":
+            self.opening_wave_guard_exit_enemy_hero_count += 1
+        elif reason == "enemy_minion":
+            self.opening_wave_guard_exit_enemy_minion_count += 1
+        elif reason == "timeout":
+            self.opening_wave_guard_exit_timeout_count += 1
+
+    def _opening_enemy_hero_visible(self, enemy_hero):
+        return enemy_hero is not None and self._unit_hp(enemy_hero) > 0 and self._visible_to_own_camp(enemy_hero)
+
+    def _opening_enemy_minion_visible(self, frame_state):
+        for npc in frame_state.get("npc_states", []) or []:
+            if self._is_enemy_minion(npc) and self._visible_to_own_camp(npc):
+                return True
+        return False
+
+    def _opening_wave_guard_target(self, frame_state, frame_no, current_pos=None):
+        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_START_FRAME):
+            current_width = float(current_pos[1]) if current_pos is not None else 0.0
+            width_limit = float(GameConfig.OPENING_WAVE_GUARD_APPROACH_WIDTH_LIMIT)
+            if abs(current_width) > width_limit:
+                current_width = width_limit if current_width > 0 else -width_limit
+            return self._unproject_own_perspective(
+                (
+                    float(GameConfig.OPENING_TOWER_TARGET_LANE),
+                    current_width,
+                )
+            )
+        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_FOLLOW_FRAME):
+            return self._unproject_own_perspective(
+                (
+                    float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
+                    float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
+                )
+            )
+
+        front_minion = self._front_own_minion(frame_state)
+        if front_minion is None:
+            target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+        else:
+            front_pos = self._project_own_perspective(front_minion)
+            if front_pos is None:
+                target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+            else:
+                target_lane = float(front_pos[0]) - float(GameConfig.OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE)
+        return self._unproject_own_perspective(
+            (
+                target_lane,
+                float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
+            )
+        )
+
+    def _front_own_minion(self, frame_state):
+        front_minion = None
+        front_lane = None
+        for npc in frame_state.get("npc_states", []) or []:
+            if not self._is_own_minion(npc):
+                continue
+            pos = self._project_own_perspective(npc)
+            if pos is None:
+                continue
+            lane = float(pos[0])
+            if front_lane is None or lane > front_lane:
+                front_lane = lane
+                front_minion = npc
+        return front_minion
 
     def _prepare_policy_observation(self, observation):
         self._track_enemy_ult_cast(observation)
@@ -1232,7 +1398,7 @@ class Agent(BaseAgent):
             return False
         if not self._tower_hp_above(main_tower, GameConfig.FORCE_HOME_TOWER_HP_MIN):
             return False
-        if self._enemy_minions_under_own_tower(frame_state, main_tower) > GameConfig.FORCE_HOME_TOWER_AREA_ENEMY_MINIONS_MAX:
+        if self._enemy_minion_in_own_half(frame_state):
             return False
         if post_kill_lane_cleared:
             return hp_rate < GameConfig.FORCE_HOME_POST_KILL_HP_TRIGGER
@@ -1282,7 +1448,7 @@ class Agent(BaseAgent):
         return lane_confirmed
 
     def _tower_hp_above(self, tower, threshold):
-        return self._unit_hp_rate(tower) > float(threshold)
+        return self._unit_hp_rate(tower) >= float(threshold)
 
     def _enemy_dead_for_force_home(self, frame_state, enemy_hero):
         frame_no = int(self._get_any(frame_state or {}, ["frame_no", "frameNo"], 0) or 0)
@@ -1299,6 +1465,14 @@ class Agent(BaseAgent):
         if enemy_dead:
             self.last_enemy_hero_kill_frame = frame_no
         return enemy_dead
+
+    def _enemy_hero_dead_for_action_rule(self, frame_state, enemy_hero):
+        if enemy_hero is None:
+            return True
+        if self._frame_action_has_enemy_hero_death(frame_state, enemy_hero):
+            return True
+        revive_time = int(self._get_any(enemy_hero, ["revive_time", "reviveTime"], 0) or 0)
+        return revive_time > 0 or self._unit_hp(enemy_hero) <= 0
 
     def _frame_action_has_enemy_hero_death(self, frame_state, enemy_hero):
         frame_action = self._get_any(frame_state or {}, ["frame_action", "frameAction"], {}) or {}
@@ -1347,6 +1521,18 @@ class Agent(BaseAgent):
             if pos is None:
                 continue
             if lane_lo <= float(pos[0]) <= lane_hi:
+                return True
+        return False
+
+    def _enemy_minion_in_own_half(self, frame_state):
+        lane_max = float(GameConfig.FORCE_HOME_OWN_HALF_ENEMY_MINION_LANE_MAX)
+        for npc in frame_state.get("npc_states", []) or []:
+            if not self._is_enemy_minion(npc):
+                continue
+            pos = self._project_own_perspective(npc)
+            if pos is None:
+                continue
+            if float(pos[0]) < lane_max:
                 return True
         return False
 
@@ -1426,6 +1612,7 @@ class Agent(BaseAgent):
         self.force_home_path_camp = None
         self.force_home_path_points = []
         self.force_home_path_ready = False
+        self.force_home_path_closed = False
         self.force_home_path_index = None
         self._reset_force_home_progress()
 
@@ -1436,19 +1623,13 @@ class Agent(BaseAgent):
         self.force_home_stuck_frames = 0
 
     def _force_home_return_exit_lane(self):
-        anchor = self._cake_anchor(False)
-        if anchor is None:
-            return float(GameConfig.FORCE_HOME_RETURN_EXIT_LANE)
-        return float(anchor[0])
+        return float(GameConfig.FORCE_HOME_RETURN_EXIT_LANE)
 
     def _force_home_path_valid_exit_lane(self):
-        anchor = self._cake_anchor(False)
-        if anchor is None:
-            return float(GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE)
-        return float(anchor[0])
+        return float(GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE)
 
     def _record_force_home_path(self, main_hero, frame_no):
-        if self.force_home_phase is not None or self.force_home_path_ready:
+        if self.force_home_phase is not None or self.force_home_path_ready or self.force_home_path_closed:
             return
         try:
             frame_no = int(frame_no or 0)
@@ -1463,6 +1644,14 @@ class Agent(BaseAgent):
             return
         points = list(self.force_home_path_points)
         return_exit_lane = self._force_home_return_exit_lane()
+        if float(pos[0]) >= return_exit_lane:
+            final_point = self._force_home_exit_path_point(points, pos, return_exit_lane)
+            if final_point is not None:
+                points.append(final_point)
+                self.force_home_path_points = self._compress_force_home_path(points)
+            self.force_home_path_ready = self._is_force_home_path_valid()
+            self.force_home_path_closed = True
+            return
         crossed_return_lane = bool(points) and points[-1][0] < return_exit_lane <= pos[0]
         turn_point = self._is_force_home_turn_point(points, pos)
         if (
@@ -1475,6 +1664,19 @@ class Agent(BaseAgent):
             self.force_home_path_points = self._compress_force_home_path(points)
         if pos[0] >= return_exit_lane:
             self.force_home_path_ready = self._is_force_home_path_valid()
+
+    def _force_home_exit_path_point(self, points, pos, return_exit_lane):
+        lane = float(pos[0])
+        width = float(pos[1])
+        if points:
+            prev_lane, prev_width = float(points[-1][0]), float(points[-1][1])
+            if prev_lane >= return_exit_lane:
+                return None
+            denom = lane - prev_lane
+            if abs(denom) > 1e-6:
+                ratio = (return_exit_lane - prev_lane) / denom
+                width = prev_width + ratio * (width - prev_width)
+        return float(return_exit_lane), float(width)
 
     def _compress_force_home_path(self, points):
         max_points = int(GameConfig.FORCE_HOME_PATH_MAX_POINTS)
@@ -1533,11 +1735,11 @@ class Agent(BaseAgent):
             return False
         first_lane = float(points[0][0])
         last_lane = float(points[-1][0])
-        if first_lane > -30000.0:
+        if first_lane > float(GameConfig.FORCE_HOME_PATH_START_LANE_MAX):
             return False
         if last_lane < self._force_home_path_valid_exit_lane():
             return False
-        return last_lane - first_lane >= 12000.0
+        return last_lane - first_lane >= float(GameConfig.FORCE_HOME_PATH_MIN_SPAN)
 
     def _has_force_home_path(self):
         if not self.force_home_path_ready:

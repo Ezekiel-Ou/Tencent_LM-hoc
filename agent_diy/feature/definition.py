@@ -197,6 +197,14 @@ class FrameCollector:
             raise ValueError(f"sample dim mismatch: {sample.shape[0]} != {Config.SAMPLE_DIM}")
         return sample.astype(np.float32)
 
+    def _append_lstm_sample(self, agent_idx, sample_batch, sample_lstm, valid_steps):
+        if not 0 < valid_steps <= self._LSTM_FRAME:
+            raise ValueError(f"invalid lstm valid steps: {valid_steps}")
+        if valid_steps < self._LSTM_FRAME:
+            sample_batch[valid_steps:, :] = 0.0
+        sample_array = self._reshape_lstm_batch_sample(sample_batch, sample_lstm)
+        self.m_replay_buffer[agent_idx].append(SampleData(sample=torch.from_numpy(sample_array)))
+
     def _format_data(self):
         sample_one_size = np.sum(self._data_shapes[:-2]) // self._LSTM_FRAME
         sample_lstm_size = np.sum(self._data_shapes[-2:])
@@ -228,10 +236,12 @@ class FrameCollector:
 
                 cnt += 1
                 if cnt == self._LSTM_FRAME:
-                    cnt = 0
-                    sample_array = self._reshape_lstm_batch_sample(sample_batch, sample_lstm)
-                    self.m_replay_buffer[agent_idx].append(SampleData(sample=torch.from_numpy(sample_array)))
+                    self._append_lstm_sample(agent_idx, sample_batch, sample_lstm, cnt)
                     sample_lstm = rl_info.lstm_info.astype(np.float32)
+                    cnt = 0
+
+            if cnt > 0:
+                self._append_lstm_sample(agent_idx, sample_batch, sample_lstm, cnt)
 
     def _assign(self, target, idx, value, expected=None):
         arr = np.asarray(value, dtype=np.float32).reshape([-1])
