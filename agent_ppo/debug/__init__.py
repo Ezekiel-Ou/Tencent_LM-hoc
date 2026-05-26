@@ -16,14 +16,30 @@ from agent_ppo.debug.luban_buff_debug import (
     format_summary_line,
     parse_attack_no,
 )
+from agent_ppo.debug.passive_buff_debug import (
+    LubanSkill1PassiveBuffDebugAgent,
+    PassiveBuffDebugAgent,
+    extract_buff_state as extract_passive_buff_state,
+    find_own_hero,
+    format_passive_buff_line,
+    format_passive_summary_line,
+    parse_attack_no as parse_passive_attack_no,
+)
 
 __all__ = [
     "DebugAgent",
     "DumpCollector",
     "LubanBuffDebugAgent",
+    "LubanSkill1PassiveBuffDebugAgent",
+    "PassiveBuffDebugAgent",
     "extract_buff_state",
+    "extract_passive_buff_state",
     "find_luban_hero",
+    "find_own_hero",
     "format_buff_line",
+    "format_passive_buff_line",
+    "format_passive_summary_line",
     "format_summary_line",
     "parse_attack_no",
+    "parse_passive_attack_no",
 ]

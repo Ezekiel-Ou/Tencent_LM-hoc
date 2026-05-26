@@ -160,8 +160,8 @@ class GameRewardManager:
         self._recover_debug = self._empty_recover_debug()
         # Safe last_hit detection (last_hit while inside own tower attack range).
         self._safe_last_hit_count = 0
-        # Duel summoner timing: 80110/80121 share one "commit to a real hero
-        # trade" reward. Light poke is neutral; obvious empty use is penalized.
+        # Duel summoner timing: 80110 is a "commit to a real hero trade"
+        # reward. Light poke is neutral; obvious empty use is penalized.
         self._pending_duel_summoner = None
         self._duel_summoner_timing_value = 0.0
         self._duel_summoner_debug = self._empty_duel_summoner_debug()
@@ -758,9 +758,7 @@ class GameRewardManager:
             "duel_summoner_poke_count": 0.0,
             "duel_summoner_wasted_count": 0.0,
             "duel_summoner_80110_cast_count": 0.0,
-            "duel_summoner_80121_cast_count": 0.0,
             "duel_summoner_80110_good_count": 0.0,
-            "duel_summoner_80121_good_count": 0.0,
         }
 
     def _empty_enemy_minion_defense_debug(self):
@@ -1383,8 +1381,6 @@ class GameRewardManager:
         self._duel_summoner_debug["duel_summoner_cast_count"] = 1.0
         if skill_id == 80110:
             self._duel_summoner_debug["duel_summoner_80110_cast_count"] = 1.0
-        elif skill_id == 80121:
-            self._duel_summoner_debug["duel_summoner_80121_cast_count"] = 1.0
 
     def _update_duel_summoner_check(self, main_hero, enemy_hero):
         pending = self._pending_duel_summoner
@@ -1428,8 +1424,6 @@ class GameRewardManager:
             self._duel_summoner_debug["duel_summoner_good_count"] = 1.0
             if skill_id == 80110:
                 self._duel_summoner_debug["duel_summoner_80110_good_count"] = 1.0
-            elif skill_id == 80121:
-                self._duel_summoner_debug["duel_summoner_80121_good_count"] = 1.0
             return GameConfig.DUEL_SUMMONER_GOOD_REWARD
 
         mid_damage_met = (

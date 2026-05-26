@@ -56,10 +56,32 @@ hero_id = 133
 [debug]
 # 是否启用 debug agent (默认 false 不影响训练)
 enable_debug_agent = false
+# Focused passive buff-id logger. Mutually exclusive with other debug modes.
+# Platform usage: set true to force scripted normal-attack-air only and print
+# [PASSIVE_BUFF] / [PASSIVE_BUFF_SUMMARY] lines plus monitor fields prefixed
+# passive_buff_debug_.
+enable_passive_buff_debug = false
+passive_buff_debug_lineups = [[112, 112], [133, 133], [112, 133], [133, 112]]
+passive_buff_debug_episodes_per_lineup = 1
+passive_buff_debug_max_frames = 900
+passive_buff_debug_max_attacks = 12
+passive_buff_debug_attack_interval_steps = 7
+passive_buff_debug_settle_steps = 12
+# Focused Luban skill-1 passive logger. Mutually exclusive with other debug modes.
+# Platform usage: set true to force 112 vs 112, cast Luban skill 1 once, then
+# normal-attack-air. Search [PASSIVE_BUFF] event=after_skill1 / event=after_attack.
+enable_luban_skill1_passive_buff_debug = true
+luban_skill1_buff_debug_episodes = 1
+luban_skill1_buff_debug_max_frames = 500
+luban_skill1_buff_debug_skill_wait_steps = 20
+luban_skill1_buff_debug_skill_to_attack_gap_steps = 7
+luban_skill1_buff_debug_attack_interval_steps = 7
+luban_skill1_buff_debug_max_attacks = 4
+luban_skill1_buff_debug_settle_steps = 12
 # Focused Luban buff-id logger. Mutually exclusive with enable_debug_agent.
 # Platform usage: set true to force 112 vs 112 and print [LUBAN_BUFF] /
 # [LUBAN_SUMMARY] lines from the scripted sweep/recovery probe.
-enable_luban_buff_debug = true
+enable_luban_buff_debug = false
 luban_buff_debug_max_episodes = 4
 luban_buff_debug_max_frames = 1200
 luban_buff_debug_min_premove_steps = 45

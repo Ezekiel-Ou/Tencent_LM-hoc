@@ -26,6 +26,15 @@ from tools.metrics_utils import get_training_metrics
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
 
+def _emit_debug_log(logger, message):
+    """Emit debug probes through both framework logger and stdout."""
+    if logger is not None:
+        log_fn = getattr(logger, "warning", None) or getattr(logger, "info", None)
+        if log_fn is not None:
+            log_fn(message)
+    print(message, flush=True)
+
+
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     # Whether the agent is training, corresponding to do_predicts
     # 智能体是否进行训练
@@ -58,8 +67,30 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     # dump observation statistics, then sys.exit(0). Toggled via [debug] in toml.
     # 阶段 A 调试模式: 用固定动作 DebugAgent 驱动 env, 采集 observation 取值范围, 然后 sys.exit(0).
     debug_conf = env_conf_manager.get_current_config().get("debug", {}) if hasattr(env_conf_manager, "get_current_config") else {}
-    if debug_conf.get("enable_debug_agent", False) and debug_conf.get("enable_luban_buff_debug", False):
-        raise ValueError("[debug] enable_debug_agent and enable_luban_buff_debug are mutually exclusive")
+    enabled_debug_modes = [
+        name
+        for name in (
+            "enable_debug_agent",
+            "enable_luban_buff_debug",
+            "enable_passive_buff_debug",
+            "enable_luban_skill1_passive_buff_debug",
+        )
+        if debug_conf.get(name, False)
+    ]
+    if len(enabled_debug_modes) > 1:
+        raise ValueError(f"[debug] debug modes are mutually exclusive: {enabled_debug_modes}")
+
+    if debug_conf.get("enable_passive_buff_debug", False):
+        _emit_debug_log(logger, f"[PASSIVE_BUFF_ENTER] agent_ppo workflow entering PASSIVE_BUFF_DEBUG mode, debug_conf={debug_conf}")
+        episode_runner.run_passive_buff_debug_episodes(debug_conf)
+        _emit_debug_log(logger, "[PASSIVE_BUFF_EXIT] agent_ppo workflow PASSIVE_BUFF_DEBUG mode finished, exiting.")
+        sys.exit(0)
+
+    if debug_conf.get("enable_luban_skill1_passive_buff_debug", False):
+        _emit_debug_log(logger, f"[PASSIVE_BUFF_ENTER] agent_ppo workflow entering LUBAN_SKILL1_PASSIVE_BUFF_DEBUG mode, debug_conf={debug_conf}")
+        episode_runner.run_luban_skill1_passive_buff_debug_episodes(debug_conf)
+        _emit_debug_log(logger, "[PASSIVE_BUFF_EXIT] agent_ppo workflow LUBAN_SKILL1_PASSIVE_BUFF_DEBUG mode finished, exiting.")
+        sys.exit(0)
 
     if debug_conf.get("enable_luban_buff_debug", False):
         if logger is not None:
@@ -326,6 +357,457 @@ class EpisodeRunner:
             # Reset agent
             # 重置agent
             agent.reset(observation[str(i)])
+
+    # ===== Passive buff debug helpers =====
+
+    def run_passive_buff_debug_episodes(self, debug_conf):
+        """Drive 112/133 lineups with normal-attack-air only and log buff ids.
+
+        This path bypasses model load, reward, sampling, and training. It is
+        meant for platform-side passive-state identification from Aisrv logs and
+        numeric monitor fields.
+        """
+        from agent_ppo.debug import (
+            PassiveBuffDebugAgent,
+            extract_passive_buff_state,
+            find_own_hero,
+            format_passive_buff_line,
+            format_passive_summary_line,
+            parse_passive_attack_no,
+        )
+
+        lineups = self._normalize_passive_debug_lineups(
+            debug_conf.get("passive_buff_debug_lineups", [[112, 112], [133, 133]])
+        )
+        episodes_per_lineup = int(debug_conf.get("passive_buff_debug_episodes_per_lineup", 1))
+        max_frames = int(debug_conf.get("passive_buff_debug_max_frames", 900))
+        settle_steps = int(debug_conf.get("passive_buff_debug_settle_steps", 12))
+        debug_agent = PassiveBuffDebugAgent(
+            attack_interval_steps=int(debug_conf.get("passive_buff_debug_attack_interval_steps", 7)),
+            max_attacks=int(debug_conf.get("passive_buff_debug_max_attacks", 12)),
+        )
+
+        is_train_test = os.environ.get("is_train_test", "False").lower() == "true"
+        side_names = ["blue", "red"]
+        global_ep = 0
+        self._passive_debug_log(
+            f"[PASSIVE_BUFF_CONFIG] lineups={lineups} episodes_per_lineup={episodes_per_lineup} "
+            f"max_frames={max_frames} max_attacks={debug_agent.max_attacks} "
+            f"attack_interval_steps={debug_agent.attack_interval_steps} settle_steps={settle_steps}"
+        )
+
+        for lineup in lineups:
+            for _ in range(max(1, episodes_per_lineup)):
+                debug_agent.reset()
+                usr_conf, _, _ = self.env_conf_manager.update_config(lineup)
+                self._inject_debug_summoner_skills(usr_conf)
+                self._passive_debug_log(
+                    f"[PASSIVE_BUFF_EPISODE_BEGIN] ep={global_ep} lineup={lineup} usr_conf={usr_conf}"
+                )
+
+                env_obs = self.env.reset(usr_conf=usr_conf)
+                if handle_disaster_recovery(env_obs, self.logger):
+                    self._passive_debug_log(
+                        f"[PASSIVE_BUFF_ABORT] ep={global_ep} lineup={lineup} "
+                        f"reason=reset_disaster_recovery env_obs={env_obs}"
+                    )
+                    return
+
+                observation = env_obs.get("observation", {})
+                last_buff_state = {}
+                skill_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+                mark_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+                attacks_attempted = {camp_idx: 0 for camp_idx in range(self.agent_num)}
+
+                for camp_idx in range(self.agent_num):
+                    obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                    hero_id = lineup[camp_idx] if camp_idx < len(lineup) else None
+                    last_buff_state[camp_idx] = extract_passive_buff_state(find_own_hero(obs_i, hero_id))
+
+                self._passive_debug_log(
+                    f"[PASSIVE_BUFF_START] ep={global_ep} lineup={lineup} "
+                    f"max_attacks={debug_agent.max_attacks} "
+                    f"attack_interval_steps={debug_agent.attack_interval_steps}"
+                )
+
+                step_no = 0
+                frame_no = env_obs.get("frame_no", 0)
+                while True:
+                    actions = []
+                    tags = []
+                    for camp_idx in range(self.agent_num):
+                        obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                        action, tag = debug_agent.act(obs_i or {}, step_no, agent_id=camp_idx)
+                        actions.append(action)
+                        tags.append(tag)
+                        if self._is_passive_air_attack_attempt(action, tag):
+                            attacks_attempted[camp_idx] += 1
+
+                    env_reward, env_obs = self.env.step(actions)
+                    if handle_disaster_recovery(env_obs, self.logger):
+                        self._passive_debug_log(
+                            f"[PASSIVE_BUFF_ABORT] ep={global_ep} lineup={lineup} "
+                            f"step={step_no} reason=step_disaster_recovery env_obs={env_obs}"
+                        )
+                        return
+
+                    frame_no = env_obs.get("frame_no", frame_no)
+                    observation = env_obs.get("observation", {})
+                    terminated = env_obs.get("terminated", 0)
+                    truncated = env_obs.get("truncated", 0)
+
+                    for camp_idx in range(self.agent_num):
+                        obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                        hero_id = lineup[camp_idx] if camp_idx < len(lineup) else 0
+                        side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                        skills, marks = extract_passive_buff_state(find_own_hero(obs_i, hero_id))
+                        current_state = (skills, marks)
+                        attack_no = parse_passive_attack_no(tags[camp_idx])
+
+                        if self._is_passive_air_attack_attempt(actions[camp_idx], tags[camp_idx]):
+                            self._record_passive_buff_ids(
+                                skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                            )
+                            self._log_passive_buff_debug_event(
+                                event="after_attack",
+                                ep=global_ep,
+                                lineup=lineup,
+                                step_no=step_no,
+                                frame_no=frame_no,
+                                side=side,
+                                side_idx=camp_idx,
+                                hero_id=hero_id,
+                                tag=tags[camp_idx],
+                                action=actions[camp_idx],
+                                attack_no=attack_no,
+                                skills=skills,
+                                marks=marks,
+                            )
+                        elif current_state != last_buff_state.get(camp_idx):
+                            self._record_passive_buff_ids(
+                                skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                            )
+                            self._log_passive_buff_debug_event(
+                                event="buff_changed",
+                                ep=global_ep,
+                                lineup=lineup,
+                                step_no=step_no,
+                                frame_no=frame_no,
+                                side=side,
+                                side_idx=camp_idx,
+                                hero_id=hero_id,
+                                tag=tags[camp_idx],
+                                action=actions[camp_idx],
+                                attack_no=attack_no,
+                                skills=skills,
+                                marks=marks,
+                            )
+                        last_buff_state[camp_idx] = current_state
+
+                    step_no += 1
+                    if (
+                        terminated
+                        or truncated
+                        or frame_no >= max_frames
+                        or (is_train_test and frame_no >= 1000)
+                        or debug_agent.episode_done(step_no, settle_steps=settle_steps)
+                    ):
+                        break
+
+                for camp_idx in range(self.agent_num):
+                    if True:
+                        side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                        hero_id = lineup[camp_idx] if camp_idx < len(lineup) else 0
+                        self._passive_debug_log(
+                            format_passive_summary_line(
+                                global_ep,
+                                lineup,
+                                side,
+                                hero_id,
+                                attacks_attempted[camp_idx],
+                                skill_ids_seen[camp_idx],
+                                mark_ids_seen[camp_idx],
+                                frame_no,
+                                debug_agent.illegal_button_count,
+                            )
+                        )
+                global_ep += 1
+
+    @staticmethod
+    def _normalize_passive_debug_lineups(raw_lineups):
+        if not isinstance(raw_lineups, list) or not raw_lineups:
+            return [[112, 112], [133, 133]]
+        lineups = []
+        for item in raw_lineups:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                lineups.append([int(item[0]), int(item[1])])
+            except (TypeError, ValueError):
+                continue
+        return lineups or [[112, 112], [133, 133]]
+
+    def run_luban_skill1_passive_buff_debug_episodes(self, debug_conf):
+        """Cast Luban skill 1 once, then air-attack to identify sweep buff ids."""
+        from agent_ppo.debug import (
+            LubanSkill1PassiveBuffDebugAgent,
+            extract_passive_buff_state,
+            find_own_hero,
+            format_passive_summary_line,
+            parse_passive_attack_no,
+        )
+
+        lineup = [112, 112]
+        episodes = int(debug_conf.get("luban_skill1_buff_debug_episodes", 1))
+        max_frames = int(debug_conf.get("luban_skill1_buff_debug_max_frames", 500))
+        settle_steps = int(debug_conf.get("luban_skill1_buff_debug_settle_steps", 12))
+        debug_agent = LubanSkill1PassiveBuffDebugAgent(
+            skill_wait_steps=int(debug_conf.get("luban_skill1_buff_debug_skill_wait_steps", 20)),
+            skill_to_attack_gap_steps=int(debug_conf.get("luban_skill1_buff_debug_skill_to_attack_gap_steps", 7)),
+            attack_interval_steps=int(debug_conf.get("luban_skill1_buff_debug_attack_interval_steps", 7)),
+            max_attacks=int(debug_conf.get("luban_skill1_buff_debug_max_attacks", 4)),
+        )
+
+        is_train_test = os.environ.get("is_train_test", "False").lower() == "true"
+        side_names = ["blue", "red"]
+        self._passive_debug_log(
+            f"[PASSIVE_BUFF_CONFIG] mode=luban_skill1_then_air_attack lineup={lineup} "
+            f"episodes={episodes} max_frames={max_frames} skill_wait_steps={debug_agent.skill_wait_steps} "
+            f"skill_to_attack_gap_steps={debug_agent.skill_to_attack_gap_steps} "
+            f"attack_interval_steps={debug_agent.attack_interval_steps} max_attacks={debug_agent.max_attacks}"
+        )
+
+        for ep in range(max(1, episodes)):
+            debug_agent.reset()
+            usr_conf, _, _ = self.env_conf_manager.update_config(lineup)
+            self._inject_debug_summoner_skills(usr_conf)
+            self._passive_debug_log(
+                f"[PASSIVE_BUFF_EPISODE_BEGIN] mode=luban_skill1_then_air_attack ep={ep} lineup={lineup} usr_conf={usr_conf}"
+            )
+
+            env_obs = self.env.reset(usr_conf=usr_conf)
+            if handle_disaster_recovery(env_obs, self.logger):
+                self._passive_debug_log(
+                    f"[PASSIVE_BUFF_ABORT] mode=luban_skill1_then_air_attack ep={ep} "
+                    f"reason=reset_disaster_recovery env_obs={env_obs}"
+                )
+                return
+
+            observation = env_obs.get("observation", {})
+            last_buff_state = {}
+            skill_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+            mark_ids_seen = {camp_idx: {} for camp_idx in range(self.agent_num)}
+            attacks_attempted = {camp_idx: 0 for camp_idx in range(self.agent_num)}
+            skill_cast_attempted = {camp_idx: 0 for camp_idx in range(self.agent_num)}
+
+            for camp_idx in range(self.agent_num):
+                obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                last_buff_state[camp_idx] = extract_passive_buff_state(find_own_hero(obs_i, 112))
+
+            self._passive_debug_log(
+                f"[PASSIVE_BUFF_START] mode=luban_skill1_then_air_attack ep={ep} lineup={lineup}"
+            )
+
+            step_no = 0
+            frame_no = env_obs.get("frame_no", 0)
+            while True:
+                actions = []
+                tags = []
+                for camp_idx in range(self.agent_num):
+                    obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                    action, tag = debug_agent.act(obs_i or {}, step_no, agent_id=camp_idx)
+                    actions.append(action)
+                    tags.append(tag)
+                    if self._is_passive_air_attack_attempt(action, tag):
+                        attacks_attempted[camp_idx] += 1
+                    if isinstance(tag, str) and tag.startswith("skill1_release") and int(action[0]) == 4:
+                        skill_cast_attempted[camp_idx] += 1
+
+                env_reward, env_obs = self.env.step(actions)
+                if handle_disaster_recovery(env_obs, self.logger):
+                    self._passive_debug_log(
+                        f"[PASSIVE_BUFF_ABORT] mode=luban_skill1_then_air_attack ep={ep} "
+                        f"step={step_no} reason=step_disaster_recovery env_obs={env_obs}"
+                    )
+                    return
+
+                frame_no = env_obs.get("frame_no", frame_no)
+                observation = env_obs.get("observation", {})
+                terminated = env_obs.get("terminated", 0)
+                truncated = env_obs.get("truncated", 0)
+
+                for camp_idx in range(self.agent_num):
+                    obs_i = observation.get(str(camp_idx)) if isinstance(observation, dict) else None
+                    side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                    skills, marks = extract_passive_buff_state(find_own_hero(obs_i, 112))
+                    current_state = (skills, marks)
+                    attack_no = parse_passive_attack_no(tags[camp_idx])
+                    if isinstance(tags[camp_idx], str) and tags[camp_idx].startswith("skill1_release"):
+                        self._record_passive_buff_ids(
+                            skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                        )
+                        self._log_passive_buff_debug_event(
+                            event="after_skill1",
+                            ep=ep,
+                            lineup=lineup,
+                            step_no=step_no,
+                            frame_no=frame_no,
+                            side=side,
+                            side_idx=camp_idx,
+                            hero_id=112,
+                            tag=tags[camp_idx],
+                            action=actions[camp_idx],
+                            attack_no=attack_no,
+                            skills=skills,
+                            marks=marks,
+                        )
+                    elif self._is_passive_air_attack_attempt(actions[camp_idx], tags[camp_idx]):
+                        self._record_passive_buff_ids(
+                            skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                        )
+                        self._log_passive_buff_debug_event(
+                            event="after_attack",
+                            ep=ep,
+                            lineup=lineup,
+                            step_no=step_no,
+                            frame_no=frame_no,
+                            side=side,
+                            side_idx=camp_idx,
+                            hero_id=112,
+                            tag=tags[camp_idx],
+                            action=actions[camp_idx],
+                            attack_no=attack_no,
+                            skills=skills,
+                            marks=marks,
+                        )
+                    elif current_state != last_buff_state.get(camp_idx):
+                        self._record_passive_buff_ids(
+                            skill_ids_seen[camp_idx], mark_ids_seen[camp_idx], skills, marks
+                        )
+                        self._log_passive_buff_debug_event(
+                            event="buff_changed",
+                            ep=ep,
+                            lineup=lineup,
+                            step_no=step_no,
+                            frame_no=frame_no,
+                            side=side,
+                            side_idx=camp_idx,
+                            hero_id=112,
+                            tag=tags[camp_idx],
+                            action=actions[camp_idx],
+                            attack_no=attack_no,
+                            skills=skills,
+                            marks=marks,
+                        )
+                    last_buff_state[camp_idx] = current_state
+
+                step_no += 1
+                if (
+                    terminated
+                    or truncated
+                    or frame_no >= max_frames
+                    or (is_train_test and frame_no >= 1000)
+                    or debug_agent.episode_done(step_no, settle_steps=settle_steps)
+                ):
+                    break
+
+            for camp_idx in range(self.agent_num):
+                side = side_names[camp_idx] if camp_idx < len(side_names) else str(camp_idx)
+                self._passive_debug_log(
+                    format_passive_summary_line(
+                        ep,
+                        lineup,
+                        side,
+                        112,
+                        attacks_attempted[camp_idx],
+                        skill_ids_seen[camp_idx],
+                        mark_ids_seen[camp_idx],
+                        frame_no,
+                        debug_agent.illegal_button_count,
+                    )
+                    + f" skill1_cast_attempted={skill_cast_attempted[camp_idx]}"
+                )
+
+    def _log_passive_buff_debug_event(self, event, ep, lineup, step_no, frame_no,
+                                      side, side_idx, hero_id, tag, action,
+                                      attack_no, skills, marks):
+        from agent_ppo.debug import format_passive_buff_line
+
+        if True:
+            self._passive_debug_log(
+                format_passive_buff_line(
+                    event,
+                    ep,
+                    lineup,
+                    step_no,
+                    frame_no,
+                    side,
+                    hero_id,
+                    tag,
+                    action,
+                    attack_no,
+                    skills,
+                    marks,
+                )
+            )
+        self._emit_passive_buff_monitor(
+            event=event,
+            ep=ep,
+            lineup=lineup,
+            side_idx=side_idx,
+            hero_id=hero_id,
+            attack_no=attack_no,
+            skills=skills,
+            marks=marks,
+        )
+
+    def _emit_passive_buff_monitor(self, event, ep, lineup, side_idx, hero_id,
+                                   attack_no, skills, marks):
+        if not self.monitor:
+            return
+        skill_slots = list(skills)[:3]
+        mark_slots = list(marks)[:2]
+        event_code = {"after_attack": 1, "buff_changed": 2, "after_skill1": 3}.get(event, 0)
+        monitor_data = {
+            "passive_buff_debug_event_code": event_code,
+            "passive_buff_debug_episode": int(ep),
+            "passive_buff_debug_lineup_code": int(lineup[0]) * 1000 + int(lineup[1]),
+            "passive_buff_debug_side": int(side_idx),
+            "passive_buff_debug_hero_id": int(hero_id or 0),
+            "passive_buff_debug_attack_no": int(attack_no or 0),
+            "passive_buff_debug_skill_count": len(skills),
+            "passive_buff_debug_mark_count": len(marks),
+        }
+        for idx in range(3):
+            cid, times = skill_slots[idx] if idx < len(skill_slots) else (0, 0)
+            monitor_data[f"passive_buff_debug_skill_id_{idx}"] = int(cid or 0)
+            monitor_data[f"passive_buff_debug_skill_times_{idx}"] = int(times or 0)
+        for idx in range(2):
+            cid, layer = mark_slots[idx] if idx < len(mark_slots) else (0, 0)
+            monitor_data[f"passive_buff_debug_mark_id_{idx}"] = int(cid or 0)
+            monitor_data[f"passive_buff_debug_mark_layer_{idx}"] = int(layer or 0)
+        self.monitor.put_data({os.getpid(): monitor_data})
+
+    def _passive_debug_log(self, message):
+        _emit_debug_log(self.logger, message)
+
+    @staticmethod
+    def _record_passive_buff_ids(skill_ids_seen, mark_ids_seen, skills, marks):
+        for cid, times in skills:
+            prev = skill_ids_seen.get(cid, 0)
+            skill_ids_seen[cid] = max(prev, 0 if times is None else int(times))
+        for cid, layer in marks:
+            prev = mark_ids_seen.get(cid, 0)
+            mark_ids_seen[cid] = max(prev, 0 if layer is None else int(layer))
+
+    @staticmethod
+    def _is_passive_air_attack_attempt(action, tag):
+        if not isinstance(tag, str) or "air_attack#" not in tag:
+            return False
+        try:
+            return int(action[0]) == 3
+        except (TypeError, ValueError, IndexError):
+            return False
 
     # ===== Luban buff debug helpers =====
 

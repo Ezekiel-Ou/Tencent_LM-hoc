@@ -64,7 +64,6 @@ SUMMONER_SKILL_MAP = {
     80105: "干扰",
     80103: "晕眩",
     80107: "净化",
-    80121: "弱化",
     80115: "闪现",
 }
 
@@ -187,7 +186,10 @@ class Agent(BaseAgent):
         select_skills = {}
         for hero_id in my_heroes:
             if forced_skill is not None:
-                select_skills[hero_id] = int(forced_skill)
+                forced_skill_id = int(forced_skill)
+                if forced_skill_id not in GameConfig.DUEL_SUMMONER_SKILL_IDS:
+                    forced_skill_id = int(GameConfig.DEFAULT_SUMMONER_SKILL)
+                select_skills[hero_id] = forced_skill_id
             elif is_eval:
                 select_skills[hero_id] = self._default_summoner_skill(hero_id, opponent_hero)
             else:
@@ -248,32 +250,7 @@ class Agent(BaseAgent):
     def _default_summoner_skill(self, my_hero, opponent_hero):
         # Eval / match always uses the configured default (currently 80110 狂暴).
         # Training cycle path also falls back here when candidates are exhausted.
-        return self._matchup_summoner_skill(my_hero, opponent_hero)
-
-    def _matchup_summoner_skill(self, my_hero, opponent_hero):
-        candidates = list(getattr(GameConfig, "DUEL_SUMMONER_SKILL_IDS", []))
-        candidates = [int(skill_id) for skill_id in candidates if int(skill_id) in GameConfig.SUMMONER_SKILL_IDS]
-        if not candidates:
-            return GameConfig.DEFAULT_SUMMONER_SKILL
-
-        try:
-            matchup = (int(my_hero), int(opponent_hero or 0))
-        except (TypeError, ValueError):
-            return GameConfig.DEFAULT_SUMMONER_SKILL
-
-        winrate_table = getattr(GameConfig, "SUMMONER_SKILL_MATCHUP_WINRATE", {})
-        skill_scores = winrate_table.get(matchup, {})
-        if not skill_scores:
-            return GameConfig.DEFAULT_SUMMONER_SKILL
-
-        best_skill = int(GameConfig.DEFAULT_SUMMONER_SKILL)
-        best_score = float(skill_scores.get(best_skill, 0.0) or 0.0)
-        for skill_id in candidates:
-            score = float(skill_scores.get(skill_id, 0.0) or 0.0)
-            if score > best_score:
-                best_skill = int(skill_id)
-                best_score = score
-        return best_skill
+        return int(GameConfig.DEFAULT_SUMMONER_SKILL)
 
     def _select_train_summoner_skill(self, my_hero, opponent_hero):
         default_skill = self._default_summoner_skill(my_hero, opponent_hero)
@@ -1299,6 +1276,14 @@ class Agent(BaseAgent):
         if self.force_home_phase is None:
             self._record_force_home_path(main_hero, frame_no)
 
+        if self._enemy_minion_blocks_force_home(frame_state, main_hero, active=self.force_home_phase is not None):
+            self._clear_force_home_phase(clear_camp=True)
+            return action
+
+        if not (enemy_dead_for_gate or self._enemy_invisible_or_far(main_hero, enemy_hero)):
+            self._clear_force_home_phase(clear_camp=True)
+            return action
+
         if self.force_home_phase == "retreat_spring" and hp_rate >= GameConfig.FORCE_HOME_HP_RECOVERED:
             self.force_home_phase = "return"
             self.force_home_path_index = None
@@ -1336,7 +1321,10 @@ class Agent(BaseAgent):
             if target is None:
                 self._clear_force_home_phase(clear_camp=True)
                 return action
-            if self._own_perspective_lane(main_hero) >= self._force_home_return_exit_lane():
+            if (
+                self._own_perspective_lane(main_hero) >= self._force_home_return_exit_lane()
+                or self._near_force_home_return_exit(main_hero)
+            ):
                 self._clear_force_home_phase(clear_camp=True)
                 return action
             return self._force_walk_to(
@@ -1401,6 +1389,8 @@ class Agent(BaseAgent):
         if self._enemy_minion_in_own_half(frame_state):
             return False
         if post_kill_lane_cleared:
+            if not (enemy_dead_for_gate or self._enemy_invisible_or_far(main_hero, enemy_hero)):
+                return False
             return hp_rate < GameConfig.FORCE_HOME_POST_KILL_HP_TRIGGER
         if self.own_cake_exists:
             return False
@@ -1536,6 +1526,16 @@ class Agent(BaseAgent):
                 return True
         return False
 
+    def _enemy_minion_blocks_force_home(self, frame_state, main_hero=None, active=False):
+        if not self._enemy_minion_in_own_half(frame_state):
+            return False
+        if not active:
+            return True
+        hero_lane = self._own_perspective_lane(main_hero)
+        if hero_lane == float("-inf"):
+            return True
+        return hero_lane > float(GameConfig.FORCE_HOME_ENEMY_MINION_ACTIVE_CANCEL_LANE)
+
     def _own_minion_wave_implies_post_kill_lane_cleared(self, frame_state):
         own_lanes = []
         lane_lo = float(GameConfig.FORCE_HOME_ENEMY_DEAD_LANE_LO)
@@ -1625,8 +1625,17 @@ class Agent(BaseAgent):
     def _force_home_return_exit_lane(self):
         return float(GameConfig.FORCE_HOME_RETURN_EXIT_LANE)
 
+    def _force_home_return_exit_radius(self):
+        return float(GameConfig.FORCE_HOME_RETURN_EXIT_RADIUS)
+
     def _force_home_path_valid_exit_lane(self):
         return float(GameConfig.FORCE_HOME_PATH_VALID_EXIT_LANE)
+
+    def _near_force_home_return_exit(self, main_hero):
+        pos = self._project_own_perspective(main_hero)
+        if pos is None or not self.force_home_path_points:
+            return False
+        return self._dist(pos, self.force_home_path_points[-1]) <= self._force_home_return_exit_radius()
 
     def _record_force_home_path(self, main_hero, frame_no):
         if self.force_home_phase is not None or self.force_home_path_ready or self.force_home_path_closed:

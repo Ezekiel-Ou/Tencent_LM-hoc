@@ -166,7 +166,6 @@ def build_monitor():
     config = config.add_panel(name="summoner_recover", name_en="summoner_recover", type="line")
     for metric_name, precision in (
         ("selected_summoner_80110", "0.01"),
-        ("selected_summoner_80121", "0.01"),
         ("duel_summoner_cast_count", "0.01"),
         ("duel_summoner_good_count", "0.01"),
         ("duel_summoner_mid_count", "0.01"),
@@ -174,9 +173,7 @@ def build_monitor():
         ("duel_summoner_poke_count", "0.01"),
         ("duel_summoner_wasted_count", "0.01"),
         ("duel_summoner_80110_cast_count", "0.01"),
-        ("duel_summoner_80121_cast_count", "0.01"),
         ("duel_summoner_80110_good_count", "0.01"),
-        ("duel_summoner_80121_good_count", "0.01"),
         ("reward_cake_pickup", "0.0001"),
         ("reward_recover_skill_low_hp", "0.0001"),
         ("cake_high_hp_penalty_count", "0.01"),
@@ -188,21 +185,5 @@ def build_monitor():
     ):
         config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
-
-    for my_hero in (112, 133):
-        for opponent_hero in (112, 133):
-            config = config.add_panel(
-                name=f"eval_{my_hero}v{opponent_hero}",
-                name_en=f"eval_{my_hero}v{opponent_hero}",
-                type="line",
-            )
-            for skill_id in (80110, 80121):
-                for suffix in ("count", "win"):
-                    config = _add_metric(
-                        config,
-                        f"eval_m{my_hero}_o{opponent_hero}_s{skill_id}_{suffix}",
-                        "0.01",
-                    )
-            config = config.end_panel()
 
     return config.end_group().build()

@@ -740,3 +740,48 @@
 - Changed the force-home start gate so own tower HP below `30%` blocks new force-home starts, while exactly `30%` is allowed by this gate.
 - Replaced the old own-tower-range enemy-minion check with a camp-aware own-perspective half-map check: any living enemy minion with `lane < 0` blocks force-home start.
 - Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed; targeted helper probe confirmed blue-side and red-side raw coordinates are both mapped to own-perspective `lane < 0` for the own-half enemy-minion gate.
+
+### 11.73 2026-05-26 berserk-only summoner selection
+
+- Removed `80121` weak/弱化 from active duel summoner training and evaluation selection by changing `DUEL_SUMMONER_SKILL_IDS` to `[80110]`; both `112` and `133` now use only berserk/狂暴 as their training candidate.
+- Updated matchup defaults, selected-summoner monitors, eval matchup monitors, and duel-summoner reward debug keys so the active selection/monitoring surface only tracks `80110`.
+- Hardened `forced_summoner_skill` handling so an attempted forced `80121` falls back to `DEFAULT_SUMMONER_SKILL=80110`. The broader `SUMMONER_SKILL_IDS` protocol whitelist still retains `80121` for observation compatibility, but it is no longer an active candidate.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\agent.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed; targeted probes confirmed workflow train/eval paths always select `[80110, 80110]`, all formal matchup defaults resolve to `80110`, and forced `80121` falls back to `80110`.
+
+### 11.74 2026-05-26 remove summoner matchup winrate monitors
+
+- Removed the four matchup eval win-rate monitor panels and the workflow `eval_m{my}_o{opponent}_s{skill}_{count,win}` reporting path; summoner monitoring now only keeps the active `selected_summoner_80110` and berserk timing/debug counters.
+- Removed the now-redundant `SUMMONER_SKILL_MATCHUP_WINRATE` table and matchup-based summoner selection helper. Formal eval, match, train fallback, and forced-skill fallback all resolve directly to `DEFAULT_SUMMONER_SKILL=80110`.
+- Rechecked weak/弱化 references in active code: only `80121` remains in `SUMMONER_SKILL_IDS` as a protocol/observation whitelist entry used by feature and action-stat slot classification. It is not a training candidate, eval candidate, forced candidate, monitor metric, or reward-debug key.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\agent.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed; targeted workflow probe confirmed train/eval selection always returns `[80110, 80110]`.
+
+### 11.74 2026-05-26 force-home duel/minion hardening
+
+- Changed force-home thresholds: post-kill force-home starts only below `40%` HP, and the forced return phase starts after HP reaches `80%`.
+- Hardened force-home so it requires the enemy hero to be dead, invisible, or farther than `FORCE_HOME_ENEMY_SAFE_RANGE`; visible close enemy heroes now block new starts and clear active phases instead of allowing forced movement during a fight.
+- Made the own-half enemy-minion gate apply to active force-home phases as well as new starts. Any living enemy minion with own-perspective `lane < 0` now clears the force-home phase and returns control to the policy.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\conf\monitor_builder.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833`, `LEGAL_ACTION_DIM=85`, `RAW_LEGAL_ACTION_DIM=184`, and `SAMPLE_DIM=81312`; targeted force-home probes confirmed near visible enemy heroes block post-kill force-home and clear active phases, far enemies allow it only below `40%`, `45%` HP does not trigger, and own-half enemy minions block both new starts and active phases.
+
+### 11.75 2026-05-26 force-home shallow/deep minion gate
+
+- Split the enemy-minion gate into a shallow start gate and a deep active-phase gate. New force-home starts are still blocked by any living enemy minion in own-perspective `lane < 0`; active force-home phases are only interrupted while the hero is still above `FORCE_HOME_ENEMY_MINION_ACTIVE_CANCEL_LANE=-30000`.
+- This mirrors the existing deep force-home/cake behavior: once the hero has already retreated deep enough, lane minions no longer cancel the trip home.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed enemy-minion detection, start blocking, shallow active interruption, and deep active non-interruption.
+
+### 11.76 2026-05-26 force-home return exit radius
+
+- Added `FORCE_HOME_RETURN_EXIT_RADIUS=1500.0`. During the return phase, force-home now exits either when own-perspective `lane >= -18000` or when the hero is within `1500` units of the final recorded return path point.
+- This avoids hard-rule movement lingering near the return endpoint if discrete movement buckets or collision keep the hero just behind the lane threshold.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed `<=1500` exits and `>1500` does not.
+
+### 11.77 2026-05-26 PPO passive buff debug
+
+- Added `agent_ppo` passive buff debug mode for Luban `112` and Di Renjie `133`. When `enable_passive_buff_debug=true`, the PPO workflow bypasses model load, sampling, and learning, forces configured 112/133 lineups, and drives both camps with scripted normal-attack-air probes only.
+- Each attack attempt emits `[PASSIVE_BUFF]` / `[PASSIVE_BUFF_SUMMARY]` logger lines with hero id, side, lineup, attack number, `buff_skills`, and `buff_marks`; numeric monitor fields use the `passive_buff_debug_` prefix.
+- Validation: `python -m py_compile agent_ppo\debug\passive_buff_debug.py agent_ppo\debug\__init__.py agent_ppo\workflow\train_workflow.py agent_ppo\conf\monitor_builder.py` passed; TOML parse assertion for `agent_ppo/conf/train_env_conf.toml` passed; targeted `PassiveBuffDebugAgent` probe confirmed air-attack, cooldown, and masked-noop behavior.
+
+### 11.78 2026-05-26 PPO Luban skill-1 passive debug
+
+- Added `enable_luban_skill1_passive_buff_debug` for `agent_ppo`: force `112v112`, cast Luban skill 1 once, wait a short gap, then normal-attack-air to identify the buff id transition for the skill-triggered next enhanced attack.
+- The log prefix stays `[PASSIVE_BUFF]`, with `event=after_skill1`, `event=after_attack`, and `event=buff_changed` separating skill release, post-skill normal attack, and delayed buff-state changes.
+- Validation: `python -m py_compile agent_ppo\debug\passive_buff_debug.py agent_ppo\debug\__init__.py agent_ppo\workflow\train_workflow.py agent_ppo\conf\monitor_builder.py` passed; TOML parse assertion confirmed the new mode is enabled and other PPO debug modes are disabled; targeted `LubanSkill1PassiveBuffDebugAgent` probe confirmed skill1 -> wait -> post-skill air attack sequencing.

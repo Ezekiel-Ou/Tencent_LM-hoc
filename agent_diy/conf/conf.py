@@ -29,17 +29,11 @@ class GameConfig:
     HERO_IDS = [112, 133]
     DEFAULT_SUMMONER_SKILL = 80110
     SUMMONER_SKILL_IDS = [80102, 80103, 80104, 80105, 80107, 80108, 80109, 80110, 80115, 80121]
-    DUEL_SUMMONER_SKILL_IDS = [80110, 80121]
+    DUEL_SUMMONER_SKILL_IDS = [80110]
     SUMMONER_SKILL_TRAIN_MODE = "cycle"
     SUMMONER_SKILL_CANDIDATES_BY_HERO = {
         112: DUEL_SUMMONER_SKILL_IDS.copy(),
         133: DUEL_SUMMONER_SKILL_IDS.copy(),
-    }
-    SUMMONER_SKILL_MATCHUP_WINRATE = {
-        (112, 112): {80110: 0.85, 80121: 0.90},
-        (112, 133): {80110: 0.85, 80121: 0.90},
-        (133, 112): {80110: 0.95, 80121: 0.90},
-        (133, 133): {80110: 0.95, 80121: 0.90},
     }
     LINEUP_SAMPLING_WEIGHTS = {
         (112, 112): 1,
@@ -111,8 +105,8 @@ class GameConfig:
         # Terminal sparse reward injected at game over. Weight stays 1.0; the
         # event value is +/- TERMINAL_WIN_REWARD.
         "win": 1.0,
-        # Summoner 80110/80121 are treated as one duel-trade button: reward
-        # only real hero fights after use; small poke is neutral.
+        # Summoner 80110 is treated as a duel-trade button: reward only real
+        # hero fights after use; small poke is neutral.
         "duel_summoner_timing": 1.0,
         # Workflow-injected action penalty once no-op streak reaches threshold.
         "no_op_streak_penalty": 1.0,
@@ -149,9 +143,7 @@ class GameConfig:
         "duel_summoner_poke_count",
         "duel_summoner_wasted_count",
         "duel_summoner_80110_cast_count",
-        "duel_summoner_80121_cast_count",
         "duel_summoner_80110_good_count",
-        "duel_summoner_80121_good_count",
         "direnjie_skill3_followup_count",
         "direnjie_skill3_miss_count",
         "enemy_minion_tower_front_count",
@@ -274,8 +266,8 @@ class GameConfig:
     FORCE_HOME_DISABLE_MONEY_TOTAL = 2900
     FORCE_HOME_HP_TRIGGER_PRE_CANNON = 0.20
     FORCE_HOME_HP_TRIGGER = 0.20
-    FORCE_HOME_HP_RECOVERED = 0.70
-    FORCE_HOME_POST_KILL_HP_TRIGGER = 0.50
+    FORCE_HOME_HP_RECOVERED = 0.80
+    FORCE_HOME_POST_KILL_HP_TRIGGER = 0.40
     FORCE_HOME_POST_KILL_WINDOW_FRAMES = 900
     FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE = 6000.0
     FORCE_HOME_TOWER_HP_MIN = 0.30
@@ -284,9 +276,11 @@ class GameConfig:
     FORCE_HOME_ENEMY_DEAD_LANE_LO = -18384.78
     FORCE_HOME_ENEMY_DEAD_LANE_HI = 18384.78
     FORCE_HOME_DEEP_LANE = -30000.0
+    FORCE_HOME_ENEMY_MINION_ACTIVE_CANCEL_LANE = FORCE_HOME_DEEP_LANE
     FORCE_HOME_RECOVER_COOLDOWN_FRAMES = 120
     CAKE_PICKUP_PROXIMITY = 1500.0
     FORCE_HOME_RETURN_EXIT_LANE = -18000.0
+    FORCE_HOME_RETURN_EXIT_RADIUS = 1500.0
     FORCE_HOME_PATH_VALID_EXIT_LANE = -18000.0
     FORCE_HOME_PATH_RECORD_FRAMES = 600
     FORCE_HOME_PATH_MAX_POINTS = 24

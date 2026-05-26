@@ -74,6 +74,68 @@ def build_monitor():
             expr="round(avg(entropy_loss{}), 0.01)",
         )
         .end_panel()
+        .add_panel(
+            name="passive_buff_debug",
+            name_en="passive_buff_debug",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_hero_id",
+            expr="round(avg(passive_buff_debug_hero_id{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_lineup_code",
+            expr="round(avg(passive_buff_debug_lineup_code{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_side",
+            expr="round(avg(passive_buff_debug_side{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_event_code",
+            expr="round(avg(passive_buff_debug_event_code{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_attack_no",
+            expr="round(avg(passive_buff_debug_attack_no{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_skill_count",
+            expr="round(avg(passive_buff_debug_skill_count{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_mark_count",
+            expr="round(avg(passive_buff_debug_mark_count{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_skill_id_0",
+            expr="round(avg(passive_buff_debug_skill_id_0{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_skill_times_0",
+            expr="round(avg(passive_buff_debug_skill_times_0{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_skill_id_1",
+            expr="round(avg(passive_buff_debug_skill_id_1{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_skill_id_2",
+            expr="round(avg(passive_buff_debug_skill_id_2{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_mark_id_0",
+            expr="round(avg(passive_buff_debug_mark_id_0{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_mark_layer_0",
+            expr="round(avg(passive_buff_debug_mark_layer_0{}), 1)",
+        )
+        .add_metric(
+            metrics_name="passive_buff_debug_mark_id_1",
+            expr="round(avg(passive_buff_debug_mark_id_1{}), 1)",
+        )
+        .end_panel()
         .end_group()
         .build()
     )
