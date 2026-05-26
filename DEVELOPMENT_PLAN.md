@@ -785,3 +785,9 @@
 - Added `enable_luban_skill1_passive_buff_debug` for `agent_ppo`: force `112v112`, cast Luban skill 1 once, wait a short gap, then normal-attack-air to identify the buff id transition for the skill-triggered next enhanced attack.
 - The log prefix stays `[PASSIVE_BUFF]`, with `event=after_skill1`, `event=after_attack`, and `event=buff_changed` separating skill release, post-skill normal attack, and delayed buff-state changes.
 - Validation: `python -m py_compile agent_ppo\debug\passive_buff_debug.py agent_ppo\debug\__init__.py agent_ppo\workflow\train_workflow.py agent_ppo\conf\monitor_builder.py` passed; TOML parse assertion confirmed the new mode is enabled and other PPO debug modes are disabled; targeted `LubanSkill1PassiveBuffDebugAgent` probe confirmed skill1 -> wait -> post-skill air attack sequencing.
+
+### 11.79 2026-05-26 force-home cake pickup protection
+
+- Added `FORCE_HOME_CAKE_PROTECT_FRAMES=60` for ordinary low-HP force-home starts. After own cake pickup is detected, ordinary low-HP force-home is blocked for 60 frames; if HP is still below `20%` after that window, force-home may start normally.
+- Kept the post-kill force-home branch unchanged: it does not check own cake state or the cake protection window, and still follows its own post-kill lane/safety/`40%` HP gates.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed frame `+59` after cake pickup blocks ordinary low-HP force-home, frame `+60` allows it if still below `20%`, and post-kill force-home is not blocked by the cake window.

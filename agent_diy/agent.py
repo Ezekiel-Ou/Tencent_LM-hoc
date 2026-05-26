@@ -1392,6 +1392,8 @@ class Agent(BaseAgent):
             if not (enemy_dead_for_gate or self._enemy_invisible_or_far(main_hero, enemy_hero)):
                 return False
             return hp_rate < GameConfig.FORCE_HOME_POST_KILL_HP_TRIGGER
+        if self._in_force_home_cake_protect_window(frame_no):
+            return False
         if self.own_cake_exists:
             return False
         if self._is_recover_skill_available(main_hero):
@@ -1599,6 +1601,9 @@ class Agent(BaseAgent):
             return False
         last_recover_frame = max(int(self.last_recover_success_frame), int(self.last_cake_eaten_frame))
         return int(frame_no or 0) - last_recover_frame < int(GameConfig.FORCE_HOME_RECOVER_COOLDOWN_FRAMES)
+
+    def _in_force_home_cake_protect_window(self, frame_no):
+        return int(frame_no or 0) - int(self.last_cake_eaten_frame) < int(GameConfig.FORCE_HOME_CAKE_PROTECT_FRAMES)
 
     def _clear_force_home_phase(self, clear_camp=False):
         self.force_home_phase = None
