@@ -81,8 +81,8 @@ class GameConfig:
         "direnjie_skill3_hit_enemy_hero": 0.40,
         "direnjie_skill3_followup_damage": 0.10,
         "direnjie_skill3_miss": -0.10,
-        # Eating a health cake. The event value is tiered by pre-pickup HP:
-        # hp<0.2 => 1.0, hp<0.5 => 0.5, hp<=0.8 => 0.3, hp>0.8 => -0.5.
+        # Eating a health cake. The event value uses the same hp_rate**0.25
+        # value function as hp_point, plus a small resource-acquisition bonus.
         "cake_pickup": 1.0,
         # Using slot 4 recover skill while low HP teaches active healing;
         # wasting it above 90% HP is penalized.
@@ -126,6 +126,17 @@ class GameConfig:
     TOWER_HP_LOW_SHAPING_THRESHOLD = 0.50
     TOWER_HP_LOW_SHAPING_TOTAL = 1.00
     TOWER_HP_LOW_SHAPING_POWER = 1.25
+    CAKE_HP_VALUE_POWER = 0.25
+    CAKE_RESOURCE_BONUS = 0.10
+    CAKE_HP_DELTA_SCALE = 3.0
+    CAKE_HIGH_HP_THRESHOLD = 0.85
+    CAKE_SMALL_GAIN_HP_RATIO = 0.03
+    CAKE_MIN_SUCCESS_HP_GAIN = 100.0
+    CAKE_WASTE_PENALTY = 0.30
+    # 30 FPS: recover can be interrupted for 2s; cake recovery can be
+    # interrupted for 3s after a confirmed successful pickup.
+    RECOVER_INTERRUPT_FRAMES = 60
+    CAKE_INTERRUPT_FRAMES = 90
     # Opening lane-control shaping. This mirrors the opening wave guard:
     # reach the first-tower area, wait at lane center, then follow our first
     # wave from behind until enemy contact after 25s or timeout.
@@ -138,12 +149,14 @@ class GameConfig:
     OPENING_POSITION_CLIP = 0.2
     REMOVE_FORWARD_AFTER = OPENING_FORWARD_END_FRAME
     REWARD_DEBUG_KEY_LIST = [
+        "cake_success_count",
+        "cake_interrupted_count",
+        "cake_wasted_count",
         "cake_high_hp_penalty_count",
         "recover_attempt_count",
         "recover_success_count",
         "recover_interrupted_count",
         "recover_high_hp_penalty_count",
-        "enemy_cleansed_us_count",
         "duel_summoner_cast_count",
         "duel_summoner_good_count",
         "duel_summoner_mid_count",
@@ -293,6 +306,7 @@ class GameConfig:
     OPENING_AIR_ATTACK_START_FRAMES_BY_HERO = {112: 540, 133: 510}
     OPENING_AIR_ATTACK_COUNTS_BY_HERO = {112: 5, 133: 6}
     OPENING_AIR_ATTACK_INTERVAL_FRAMES = 35
+    OPENING_LUBAN_SWEEP_HOLD_FRAMES = 30
     OPENING_WAVE_GUARD_FORWARD_DELTA = 2500.0
     OPENING_BERSERK_ENEMY_LANE_MAX = -2000.0
     OPENING_BERSERK_ENEMY_DISTANCE = 8800.0
@@ -329,10 +343,10 @@ class GameConfig:
     FORCE_HOME_HP_RECOVERED = 0.80
     FORCE_HOME_POST_KILL_HP_TRIGGER = 0.40
     FORCE_HOME_POST_KILL_WINDOW_FRAMES = 900
-    FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE = 6000.0
+    FORCE_HOME_POST_KILL_OWN_MINION_CLEAR_LANE = 4000.0
     FORCE_HOME_TOWER_HP_MIN = 0.30
     FORCE_HOME_ENEMY_SAFE_RANGE = 10000.0
-    FORCE_HOME_OWN_HALF_ENEMY_MINION_LANE_MAX = 0.0
+    FORCE_HOME_OWN_HALF_ENEMY_MINION_LANE_MAX = 4000.0
     FORCE_HOME_ENEMY_DEAD_LANE_LO = -18384.78
     FORCE_HOME_ENEMY_DEAD_LANE_HI = 18384.78
     FORCE_HOME_DEEP_LANE = -30000.0

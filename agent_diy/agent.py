@@ -148,6 +148,7 @@ class Agent(BaseAgent):
         self.opening_wave_guard_approach_count = 0
         self.opening_wave_guard_wait_count = 0
         self.opening_wave_guard_follow_count = 0
+        self.opening_wave_guard_exit_enemy_attack_count = 0
         self.opening_wave_guard_exit_enemy_hero_count = 0
         self.opening_wave_guard_exit_enemy_minion_count = 0
         self.opening_wave_guard_exit_timeout_count = 0
@@ -161,6 +162,13 @@ class Agent(BaseAgent):
         self.opening_enemy_hero_attack_skip_count = 0
         self.opening_enemy_hero_attack_pending = False
         self.opening_hero_engage_done = False
+        self.opening_hero_engage_step = None
+        self.opening_hero_engage_hero_id = None
+        self.opening_direnjie_skill1_count = 0
+        self.opening_direnjie_skill1_skip_count = 0
+        self.opening_luban_sweep_attack_count = 0
+        self.opening_luban_sweep_hold_count = 0
+        self.opening_luban_sweep_start_frame = None
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
@@ -328,6 +336,7 @@ class Agent(BaseAgent):
         self.opening_wave_guard_approach_count = 0
         self.opening_wave_guard_wait_count = 0
         self.opening_wave_guard_follow_count = 0
+        self.opening_wave_guard_exit_enemy_attack_count = 0
         self.opening_wave_guard_exit_enemy_hero_count = 0
         self.opening_wave_guard_exit_enemy_minion_count = 0
         self.opening_wave_guard_exit_timeout_count = 0
@@ -341,6 +350,13 @@ class Agent(BaseAgent):
         self.opening_enemy_hero_attack_skip_count = 0
         self.opening_enemy_hero_attack_pending = False
         self.opening_hero_engage_done = False
+        self.opening_hero_engage_step = None
+        self.opening_hero_engage_hero_id = None
+        self.opening_direnjie_skill1_count = 0
+        self.opening_direnjie_skill1_skip_count = 0
+        self.opening_luban_sweep_attack_count = 0
+        self.opening_luban_sweep_hold_count = 0
+        self.opening_luban_sweep_start_frame = None
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
@@ -739,7 +755,7 @@ class Agent(BaseAgent):
         return self._unproject_own_perspective((lane, width))
 
     def _maybe_opening_wave_guard(self, observation, action):
-        if self.opening_wave_guard_done or self.cleanse_override_active:
+        if self.opening_wave_guard_done:
             return action
 
         frame_state = observation.get("frame_state", {}) or {}
@@ -758,6 +774,8 @@ class Agent(BaseAgent):
 
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if main_hero is None or self._unit_hp(main_hero) <= 0:
+            return action
+        if self.cleanse_override_active:
             return action
         enemy_hero_visible = self._opening_enemy_hero_visible(enemy_hero)
         enemy_minion_visible = self._opening_enemy_minion_visible(frame_state)
@@ -778,26 +796,28 @@ class Agent(BaseAgent):
                 return action
             self.opening_wave_guard_active = True
 
-        if self.opening_enemy_hero_attack_pending:
-            hero_attack = self._opening_enemy_hero_attack(observation)
-            self._finish_opening_wave_guard("enemy_hero", frame_no)
-            return hero_attack if hero_attack is not None else action
+        if (
+            self._opening_in_air_attack_phase(frame_no, main_hero)
+            and self._opening_hit_by_enemy_hero_attack(main_hero, enemy_hero)
+        ):
+            self._finish_opening_wave_guard("enemy_attack", frame_no)
+            return action
 
         air_action = self._maybe_opening_air_phase_action(observation, frame_no, main_hero)
         if air_action is not None:
             return air_action
 
-        if (
-            enemy_hero_visible
-            and not self.opening_hero_engage_done
-            and self._distance_between_heroes(main_hero, enemy_hero) < float(GameConfig.OPENING_BERSERK_ENEMY_DISTANCE)
-        ):
-            engage_action = self._opening_hero_engage_action(observation)
-            self.opening_hero_engage_done = True
-            if engage_action is not None:
-                return engage_action
-            self._finish_opening_wave_guard("enemy_hero", frame_no)
-            return action
+        engage_handled, engage_action = self._maybe_opening_hero_engage_action(
+            observation,
+            frame_state,
+            frame_no,
+            main_hero,
+            enemy_hero,
+            enemy_hero_visible,
+            action,
+        )
+        if engage_handled:
+            return engage_action
 
         if enemy_minion_visible:
             self._finish_opening_wave_guard("enemy_minion", frame_no)
@@ -835,6 +855,12 @@ class Agent(BaseAgent):
 
     def _opening_air_attack_phase_done(self, main_hero=None):
         return len(self.opening_air_attack_done_frames) >= self._opening_air_attack_count(main_hero)
+
+    def _opening_in_air_attack_phase(self, frame_no, main_hero=None):
+        return (
+            frame_no >= self._opening_air_attack_start_frame(main_hero)
+            and not self._opening_air_attack_phase_done(main_hero)
+        )
 
     def _maybe_opening_air_attack(self, observation, frame_no, main_hero=None):
         attack_frame = None
@@ -882,17 +908,135 @@ class Agent(BaseAgent):
         self.opening_air_hold_count += 1
         return [1, 8, 8, 8, 8, 0]
 
-    def _opening_hero_engage_action(self, observation):
-        berserk = self._opening_berserk_action(observation)
-        if berserk is not None:
+    def _opening_rule_wait_action(self):
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        return [1, 8, 8, 8, 8, 0]
+
+    def _maybe_opening_hero_engage_action(
+        self,
+        observation,
+        frame_state,
+        frame_no,
+        main_hero,
+        enemy_hero,
+        enemy_hero_visible,
+        fallback_action,
+    ):
+        if self.opening_luban_sweep_start_frame is not None:
+            return True, self._opening_luban_sweep_hold_action(frame_no, fallback_action)
+
+        if self.opening_hero_engage_done:
+            return False, fallback_action
+
+        hero_id = self._hero_config_id(main_hero)
+        if self.opening_hero_engage_step is None:
+            if not (
+                enemy_hero_visible
+                and self._distance_between_heroes(main_hero, enemy_hero)
+                < float(GameConfig.OPENING_BERSERK_ENEMY_DISTANCE)
+            ):
+                return False, fallback_action
+            if hero_id not in (112, 133):
+                self.opening_hero_engage_done = True
+                self._finish_opening_wave_guard("enemy_hero", frame_no)
+                return True, fallback_action
+            self.opening_hero_engage_step = 0
+            self.opening_hero_engage_hero_id = hero_id
+
+        if enemy_hero is None or self._enemy_hero_dead_for_action_rule(frame_state, enemy_hero):
+            self._finish_opening_hero_engage(frame_no)
+            return True, fallback_action
+
+        if self.opening_hero_engage_hero_id == 133:
+            return True, self._opening_direnjie_engage_action(observation, main_hero, enemy_hero, frame_no)
+        if self.opening_hero_engage_hero_id == 112:
+            return True, self._opening_luban_engage_action(observation, frame_no)
+
+        self._finish_opening_hero_engage(frame_no)
+        return True, fallback_action
+
+    def _opening_direnjie_engage_action(self, observation, main_hero, enemy_hero, frame_no):
+        step = int(self.opening_hero_engage_step or 0)
+        if step == 0:
+            berserk = self._opening_berserk_action(observation)
+            if berserk is None:
+                self.opening_berserk_skip_count += 1
+                return self._opening_rule_wait_action()
             self.rule_override_active = True
             self.rule_override_count += 1
             self.opening_berserk_trigger_count += 1
-            self.opening_enemy_hero_attack_pending = True
+            self.opening_hero_engage_step = 1
             return berserk
-        self.opening_berserk_skip_count += 1
+
+        if step == 1:
+            hero_attack = self._opening_enemy_hero_attack(observation)
+            if hero_attack is None:
+                return self._opening_rule_wait_action()
+            self.opening_hero_engage_step = 2
+            return hero_attack
+
+        skill1 = self._opening_direnjie_skill1_action(observation, main_hero, enemy_hero)
+        if skill1 is None:
+            self.opening_direnjie_skill1_skip_count += 1
+            return self._opening_rule_wait_action()
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        self.opening_direnjie_skill1_count += 1
+        self._finish_opening_hero_engage(frame_no)
+        return skill1
+
+    def _opening_luban_engage_action(self, observation, frame_no):
         hero_attack = self._opening_enemy_hero_attack(observation)
+        if hero_attack is None:
+            return self._opening_rule_wait_action()
+        self.opening_luban_sweep_attack_count += 1
+        self.opening_luban_sweep_start_frame = frame_no
+        self.opening_hero_engage_step = 1
         return hero_attack
+
+    def _opening_luban_sweep_hold_action(self, frame_no, fallback_action):
+        elapsed = int(frame_no or 0) - int(self.opening_luban_sweep_start_frame or 0)
+        if elapsed < int(GameConfig.OPENING_LUBAN_SWEEP_HOLD_FRAMES):
+            self.opening_luban_sweep_hold_count += 1
+            return self._opening_rule_wait_action()
+        self._finish_opening_hero_engage(frame_no)
+        return fallback_action
+
+    def _finish_opening_hero_engage(self, frame_no):
+        self.opening_hero_engage_done = True
+        self.opening_hero_engage_step = None
+        self.opening_hero_engage_hero_id = None
+        self.opening_luban_sweep_start_frame = None
+        self._finish_opening_wave_guard("enemy_hero", frame_no)
+
+    def _opening_direnjie_skill1_action(self, observation, main_hero, enemy_hero):
+        aim = self._opening_enemy_direction_aim(main_hero, enemy_hero)
+        if aim is None:
+            skill_x, skill_z = 8, 8
+        else:
+            skill_x, skill_z = aim
+        action = self._legalized_rule_action(
+            observation,
+            [4, 15, 15, skill_x, skill_z, 1],
+            active_heads=(3, 4, 5),
+        )
+        if action is None or int(action[5]) != 1:
+            return None
+        return action
+
+    def _opening_enemy_direction_aim(self, main_hero, enemy_hero):
+        main_loc = self._own_raw_location(main_hero)
+        enemy_loc = self._own_raw_location(enemy_hero)
+        if main_loc is None or enemy_loc is None:
+            return None
+        dx = float(enemy_loc[0]) - float(main_loc[0])
+        dz = float(enemy_loc[1]) - float(main_loc[1])
+        scale = max(abs(dx), abs(dz))
+        return (
+            self._aim_axis_bucket(dx, scale, Config.LABEL_SIZE_LIST[3]),
+            self._aim_axis_bucket(dz, scale, Config.LABEL_SIZE_LIST[4]),
+        )
 
     def _opening_berserk_action(self, observation):
         for target in (2, 0):
@@ -919,6 +1063,9 @@ class Agent(BaseAgent):
         self.opening_air_attack_done_frames = set()
         self.opening_enemy_hero_attack_pending = False
         self.opening_hero_engage_done = False
+        self.opening_hero_engage_step = None
+        self.opening_hero_engage_hero_id = None
+        self.opening_luban_sweep_start_frame = None
         if clear_done:
             self.opening_wave_guard_done = False
 
@@ -926,12 +1073,38 @@ class Agent(BaseAgent):
         if self.opening_wave_guard_done:
             return
         self.opening_wave_guard_done = True
-        if reason == "enemy_hero":
+        if reason == "enemy_attack":
+            self.opening_wave_guard_exit_enemy_attack_count += 1
+        elif reason == "enemy_hero":
             self.opening_wave_guard_exit_enemy_hero_count += 1
         elif reason == "enemy_minion":
             self.opening_wave_guard_exit_enemy_minion_count += 1
         elif reason == "timeout":
             self.opening_wave_guard_exit_timeout_count += 1
+
+    def _opening_hit_by_enemy_hero_attack(self, main_hero, enemy_hero):
+        main_runtime = self._actor_runtime(main_hero)
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        if enemy_runtime is None:
+            return False
+        for hurt in self._get_any(main_hero or {}, ["take_hurt_infos", "takeHurtInfos"], []) or []:
+            if not isinstance(hurt, dict):
+                continue
+            atker = self._get_any(hurt, ["atker", "attacker"], None)
+            if atker is None or str(atker) != str(enemy_runtime):
+                continue
+            hurt_value = self._get_any(hurt, ["hurtValue", "hurt_value"], None)
+            if hurt_value is None or self._safe_float(hurt_value) > 0:
+                return True
+        if main_runtime is None:
+            return False
+        for hit in self._get_any(enemy_hero or {}, ["hit_target_info", "hitTargetInfo"], []) or []:
+            if not isinstance(hit, dict):
+                continue
+            target_runtime = self._get_any(hit, ["hit_target", "hitTarget"], None)
+            if target_runtime is not None and str(target_runtime) == str(main_runtime):
+                return True
+        return False
 
     def _opening_enemy_hero_visible(self, enemy_hero):
         return enemy_hero is not None and self._unit_hp(enemy_hero) > 0 and self._visible_to_own_camp(enemy_hero)

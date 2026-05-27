@@ -248,7 +248,7 @@ class EpisodeRunner:
                     now = time.time()
                     if now - self.last_report_monitor_time >= 60:
                         if self.monitor:
-                            monitor_data = {}
+                            monitor_data = {"episode_cnt": self.episode_cnt}
                             if is_eval:
                                 monitor_data["reward"] = round(reward_sum_list[monitor_side], 2)
                             for reward_name, reward_value in reward_item_sum_list[monitor_side].items():
@@ -295,6 +295,13 @@ class EpisodeRunner:
                             monitor_data["opening_unstuck_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_unstuck_count", 0)
                             )
+                            monitor_data["opening_wave_guard_exit_enemy_attack_count"] = float(
+                                getattr(
+                                    self.agents[monitor_side],
+                                    "opening_wave_guard_exit_enemy_attack_count",
+                                    0,
+                                )
+                            )
                             monitor_data["opening_air_attack_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_air_attack_count", 0)
                             )
@@ -315,6 +322,18 @@ class EpisodeRunner:
                             )
                             monitor_data["opening_enemy_hero_attack_skip_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_enemy_hero_attack_skip_count", 0)
+                            )
+                            monitor_data["opening_direnjie_skill1_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_direnjie_skill1_count", 0)
+                            )
+                            monitor_data["opening_direnjie_skill1_skip_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_direnjie_skill1_skip_count", 0)
+                            )
+                            monitor_data["opening_luban_sweep_attack_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_luban_sweep_attack_count", 0)
+                            )
+                            monitor_data["opening_luban_sweep_hold_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_luban_sweep_hold_count", 0)
                             )
                             monitor_data["cleanse_override_count"] = float(
                                 getattr(self.agents[monitor_side], "cleanse_override_count", 0)

@@ -853,3 +853,18 @@
 - Removed constant panel metric `selected_summoner_80110` from the displayed monitor config while keeping the workflow-side generic selected-summoner export path intact for future multi-skill configurations.
 - Renamed displayed/exported force-home metric `force_home_no_emy_minion_cnt` to `force_home_no_enemy_minion_cnt`.
 - Validation: `python -m py_compile agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; stubbed `MonitorConfigBuilder` probe confirmed 18 panels and 116 displayed metrics, with `selected_summoner_80110` absent and `force_home_no_enemy_minion_cnt` present under `rule_force_home`.
+
+### 11.89 2026-05-27 opening rule exits on enemy attack
+
+- Opening unstuck and opening wave guard now immediately stop scripted opening behavior when the main hero is hit by an enemy-side actor. The check runs before air attacks, hold actions, hero-engage actions, and cleanse-skip returns, so the current frame falls back to the policy/previous override action instead of continuing the opening rule.
+- The hit detector uses `take_hurt_infos/takeHurtInfos` attacker runtime against all enemy-side hero/NPC runtimes, with `hit_target_info/hitTargetInfo` as a secondary signal when it targets the main hero.
+- Added `opening_wave_guard_exit_enemy_attack_count` to agent state, workflow export, and the `rule_opening` monitor panel.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`.
+
+### 11.90 2026-05-27 hero-specific opening engage
+
+- Narrowed the enemy-attack opening exit to the standing air-attack phase only. After the hero-specific air attacks are complete, opening engage no longer exits just because the enemy hero attacks.
+- Di Renjie (`133`) now uses a frame-by-frame opening engage sequence after visible close enemy contact: cast berserk as soon as legal, then enemy-hero normal attack as soon as legal, then skill 1 toward the enemy hero as soon as legal. Illegal steps hold position and retry on the next frame.
+- Luban (`112`) now keeps opening control for `30` frames after the enemy-hero normal attack that starts sweep fire, using stand-still hold actions to avoid immediately interrupting the long sweep with policy movement/skill output.
+- Added monitor/export counters for Di Renjie opening skill 1 attempts and Luban sweep attack/hold behavior.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted helper probe confirmed the enemy-hero attack detector and air-attack phase gate.

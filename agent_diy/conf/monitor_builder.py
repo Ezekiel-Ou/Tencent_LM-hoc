@@ -186,6 +186,7 @@ def build_monitor():
     config = config.add_panel(name="rule_opening", name_en="rule_opening", type="line")
     for metric_name in (
         "opening_unstuck_count",
+        "opening_wave_guard_exit_enemy_attack_count",
         "opening_air_attack_count",
         "opening_air_attack_skip_count",
         "opening_air_hold_count",
@@ -193,6 +194,10 @@ def build_monitor():
         "opening_berserk_skip_count",
         "opening_enemy_hero_attack_count",
         "opening_enemy_hero_attack_skip_count",
+        "opening_direnjie_skill1_count",
+        "opening_direnjie_skill1_skip_count",
+        "opening_luban_sweep_attack_count",
+        "opening_luban_sweep_hold_count",
     ):
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
@@ -233,18 +238,14 @@ def build_monitor():
     for metric_name, precision in (
         ("reward_cake_pickup", "0.0001"),
         ("reward_recover_skill_low_hp", "0.0001"),
+        ("cake_success_count", "0.01"),
+        ("cake_interrupted_count", "0.01"),
+        ("cake_wasted_count", "0.01"),
         ("cake_high_hp_penalty_count", "0.01"),
         ("recover_attempt_count", "0.01"),
         ("recover_success_count", "0.01"),
         ("recover_interrupted_count", "0.01"),
         ("recover_high_hp_penalty_count", "0.01"),
-    ):
-        config = _add_metric(config, metric_name, precision)
-    config = config.end_panel()
-
-    config = config.add_panel(name="counterplay_cleanse", name_en="counterplay_cleanse", type="line")
-    for metric_name, precision in (
-        ("enemy_cleansed_us_count", "0.01"),
     ):
         config = _add_metric(config, metric_name, precision)
     config = config.end_panel()

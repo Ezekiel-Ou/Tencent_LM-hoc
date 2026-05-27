@@ -85,6 +85,15 @@ def _hp_rate(unit, default=0.0):
     return _safe_div(_hp(unit), _max_hp(unit), default)
 
 
+def _hp_value_rate(hp_rate):
+    try:
+        hp_rate = float(hp_rate)
+    except (TypeError, ValueError):
+        hp_rate = 0.0
+    hp_rate = min(max(hp_rate, 0.0), 1.0)
+    return math.pow(hp_rate, float(GameConfig.CAKE_HP_VALUE_POWER))
+
+
 def _tower_hp_reward_value(tower):
     hp_rate = min(max(_hp_rate(tower or {}), 0.0), 1.0)
     threshold = float(GameConfig.TOWER_HP_LOW_SHAPING_THRESHOLD)
@@ -153,6 +162,7 @@ class GameRewardManager:
         # Cake pickup detection: track cake positions and main hero HP from previous frame.
         self.prev_cake_locs = set()
         self.prev_main_hp = None
+        self._pending_cake_interrupt = None
         self._cake_pickup_count = 0
         self._cake_debug = self._empty_cake_debug()
         # Recover-skill-at-low-HP detection: record low-HP attempts and settle
@@ -632,8 +642,8 @@ class GameRewardManager:
         )
         self.main_total_hurt_to_hero_delta = self._compute_main_total_hurt_to_hero_delta(main_hero)
         self._skill_hit_reward_counts = self._compute_skill_hit_events(frame_data, main_hero, enemy_hero)
-        self._cake_pickup_count = self._detect_cake_pickup(frame_data, main_hero, enemy_hero)
-        self._recover_low_hp_count = self._detect_recover_low_hp(main_hero, frame_no)
+        self._cake_pickup_count = self._detect_cake_pickup(frame_data, main_hero, enemy_hero, frame_no)
+        self._recover_low_hp_count = self._detect_recover_low_hp(main_hero, enemy_hero, frame_no)
         self._duel_summoner_timing_value = self._detect_duel_summoner_timing(
             frame_data, main_hero, enemy_hero, frame_no
         )
@@ -735,7 +745,6 @@ class GameRewardManager:
         reward_dict.update(self.m_last_hit_debug)
         reward_dict.update(self._cake_debug)
         reward_dict.update(self._recover_debug)
-        reward_dict["enemy_cleansed_us_count"] = float(self._cleanse_enemy_count)
         reward_dict.update(self._duel_summoner_debug)
         reward_dict.update(self._enemy_minion_defense_debug)
         reward_dict.update(self._river_crab_pressure_debug)
@@ -857,6 +866,9 @@ class GameRewardManager:
 
     def _empty_cake_debug(self):
         return {
+            "cake_success_count": 0,
+            "cake_interrupted_count": 0,
+            "cake_wasted_count": 0,
             "cake_high_hp_penalty_count": 0,
         }
 
@@ -1419,11 +1431,12 @@ class GameRewardManager:
             return 0.0
         return max(0.0, current - previous)
 
-    def _detect_cake_pickup(self, frame_data, main_hero, enemy_hero):
+    def _detect_cake_pickup(self, frame_data, main_hero, enemy_hero, frame_no):
         # Detect: cake disappeared this frame + main hero is close enough and
-        # closer than the enemy. High-HP pickups may not produce a visible HP
-        # jump, so the proximity ownership check is used before HP-tier scoring.
+        # closer than the enemy. The event value follows hp_point's hp value
+        # function, while obvious high-HP waste remains a light penalty.
         self._cake_debug = self._empty_cake_debug()
+        frame_no = int(frame_no or 0)
         cakes = frame_data.get("cakes", []) or []
         current_locs = set()
         for cake in cakes:
@@ -1436,47 +1449,91 @@ class GameRewardManager:
         disappeared = self.prev_cake_locs - current_locs
         self.prev_cake_locs = current_locs
 
-        if not disappeared or main_hero is None:
-            self.prev_main_hp = _hp(main_hero) if main_hero else None
+        if main_hero is None:
+            self.prev_main_hp = None
+            self._pending_cake_interrupt = None
             return 0.0
 
         main_pos = self._entity_pos(main_hero)
         if main_pos is None:
             self.prev_main_hp = _hp(main_hero)
+            self._pending_cake_interrupt = None
             return 0.0
         main_hp = float(_hp(main_hero) or 0)
-        main_max_hp = float(_max_hp(main_hero) or 1)
-        prev_main_hp = self.prev_main_hp if self.prev_main_hp is not None else main_hp
-        prev_hp_rate = prev_main_hp / max(main_max_hp, 1.0)
-        hp_jump = main_hp - (self.prev_main_hp if self.prev_main_hp is not None else main_hp)
+        main_max_hp = max(float(_max_hp(main_hero) or 1), 1.0)
+        prev_main_hp = float(self.prev_main_hp if self.prev_main_hp is not None else main_hp)
+        prev_hp_rate = min(max(prev_main_hp / main_max_hp, 0.0), 1.0)
+        current_hp_rate = min(max(main_hp / main_max_hp, 0.0), 1.0)
+        hp_gain = max(0.0, main_hp - prev_main_hp)
+        hp_gain_rate = hp_gain / main_max_hp
+        hp_value_delta = max(0.0, _hp_value_rate(current_hp_rate) - _hp_value_rate(prev_hp_rate))
         self.prev_main_hp = main_hp
 
         enemy_pos = self._entity_pos(enemy_hero) if enemy_hero else None
-
-        if prev_hp_rate < 0.2:
-            reward_value = 1.0
-        elif prev_hp_rate < 0.5:
-            reward_value = 0.5
-        elif prev_hp_rate <= 0.8:
-            reward_value = 0.3
-        else:
-            reward_value = -0.5
-
+        hurt_by_enemy_hero = self._hurt_by_enemy_hero(main_hero, enemy_hero)
         count = 0.0
+        pickup_detected = False
+        success_detected = False
         for cake_pos in disappeared:
             d_main = ((main_pos[0] - cake_pos[0]) ** 2 + (main_pos[1] - cake_pos[1]) ** 2) ** 0.5
-            if d_main > 1500:
+            if d_main > GameConfig.CAKE_PICKUP_PROXIMITY:
                 continue
             if enemy_pos is not None:
                 d_enemy = ((enemy_pos[0] - cake_pos[0]) ** 2 + (enemy_pos[1] - cake_pos[1]) ** 2) ** 0.5
                 if d_enemy < d_main:
                     continue
-            if reward_value > 0 and hp_jump < 100:
-                continue
-            if reward_value < 0:
+
+            if (
+                prev_hp_rate >= float(GameConfig.CAKE_HIGH_HP_THRESHOLD)
+                and hp_gain_rate <= float(GameConfig.CAKE_SMALL_GAIN_HP_RATIO)
+            ):
+                reward_value = -float(GameConfig.CAKE_WASTE_PENALTY)
+                self._cake_debug["cake_wasted_count"] += 1
                 self._cake_debug["cake_high_hp_penalty_count"] += 1
+            elif hp_gain < float(GameConfig.CAKE_MIN_SUCCESS_HP_GAIN):
+                continue
+            else:
+                reward_value = float(GameConfig.CAKE_RESOURCE_BONUS) + float(GameConfig.CAKE_HP_DELTA_SCALE) * hp_value_delta
+                self._cake_debug["cake_success_count"] += 1
+                success_detected = True
+            pickup_detected = True
             count += reward_value
+
+        if pickup_detected:
+            self._pending_cake_interrupt = {"pickup_frame": frame_no} if success_detected else None
+            return count
+
+        self._settle_pending_cake_interrupt(frame_no, hurt_by_enemy_hero)
         return count
+
+    def _settle_pending_cake_interrupt(self, frame_no, hurt_by_enemy_hero):
+        pending = self._pending_cake_interrupt
+        if pending is None:
+            return
+        pickup_frame = int(pending.get("pickup_frame", frame_no))
+        elapsed = frame_no - pickup_frame
+        if 0 <= elapsed <= int(GameConfig.CAKE_INTERRUPT_FRAMES) and hurt_by_enemy_hero:
+            self._cake_debug["cake_interrupted_count"] = 1
+            self._pending_cake_interrupt = None
+            return
+        if elapsed > int(GameConfig.CAKE_INTERRUPT_FRAMES):
+            self._pending_cake_interrupt = None
+
+    def _hurt_by_enemy_hero(self, main_hero, enemy_hero):
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        if main_hero is None or enemy_runtime is None:
+            return False
+        for hurt in _get_any(main_hero, ["take_hurt_infos", "takeHurtInfos"], []) or []:
+            atker = _get_any(hurt, ["atker", "attacker"], None)
+            if atker is None or str(atker) != str(enemy_runtime):
+                continue
+            try:
+                hurt_value = float(_get_any(hurt, ["hurtValue", "hurt_value"], 0) or 0)
+            except (TypeError, ValueError):
+                hurt_value = 0.0
+            if hurt_value > 0:
+                return True
+        return False
 
     def _detect_duel_summoner_timing(self, frame_data, main_hero, enemy_hero, frame_no):
         self._duel_summoner_debug = self._empty_duel_summoner_debug()
@@ -2349,7 +2406,7 @@ class GameRewardManager:
             return False
         return math.dist(_loc(main_hero), _loc(enemy_hero)) <= GameConfig.BERSERK_ENGAGE_RANGE
 
-    def _detect_recover_low_hp(self, main_hero, frame_no):
+    def _detect_recover_low_hp(self, main_hero, enemy_hero, frame_no):
         self._recover_debug = self._empty_recover_debug()
         if main_hero is None:
             self._pending_recover = None
@@ -2362,6 +2419,7 @@ class GameRewardManager:
         buff_ids = self._hero_buff_ids(main_hero)
         has_start_buff = GameConfig.RECOVER_START_BUFF_ID in buff_ids
         has_effect_buff = GameConfig.RECOVER_EFFECT_BUFF_ID in buff_ids
+        hurt_by_enemy_hero = self._hurt_by_enemy_hero(main_hero, enemy_hero)
 
         slot4_used = self._slot_succ_used(main_hero, 4)
         summoner_heal_used = self._used_skill_by_config(main_hero, 80102)
@@ -2388,14 +2446,18 @@ class GameRewardManager:
                 self._pending_recover.get("saw_effect_buff", False) or has_effect_buff
             )
             elapsed = frame_no - int(self._pending_recover["attempt_frame"])
-            if elapsed >= GameConfig.RECOVER_CONFIRM_FRAMES:
-                hp_gain = main_hp - float(self._pending_recover["main_hp_at_attempt"])
-                success = hp_gain >= GameConfig.RECOVER_HP_GAIN_THRESHOLD
+            hp_gain = main_hp - float(self._pending_recover["main_hp_at_attempt"])
+            success = hp_gain >= GameConfig.RECOVER_HP_GAIN_THRESHOLD
+            if success and elapsed >= GameConfig.RECOVER_CONFIRM_FRAMES:
                 self._pending_recover = None
-                if success:
-                    self._recover_debug["recover_success_count"] = 1
-                    return 1
+                self._recover_debug["recover_success_count"] = 1
+                return 1
+            if 0 <= elapsed <= int(GameConfig.RECOVER_INTERRUPT_FRAMES) and hurt_by_enemy_hero and not success:
+                self._pending_recover = None
                 self._recover_debug["recover_interrupted_count"] = 1
+                return 0
+            if elapsed > int(GameConfig.RECOVER_INTERRUPT_FRAMES):
+                self._pending_recover = None
         return 0
 
     def _hero_buff_ids(self, hero):
