@@ -278,7 +278,7 @@ class EpisodeRunner:
                             monitor_data["force_home_return_count"] = float(
                                 getattr(self.agents[monitor_side], "force_home_return_count", 0)
                             )
-                            monitor_data["force_home_no_emy_minion_cnt"] = float(
+                            monitor_data["force_home_no_enemy_minion_cnt"] = float(
                                 getattr(
                                     self.agents[monitor_side],
                                     "force_home_post_kill_no_enemy_minion_visible_count",
@@ -294,6 +294,27 @@ class EpisodeRunner:
                             )
                             monitor_data["opening_unstuck_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_unstuck_count", 0)
+                            )
+                            monitor_data["opening_air_attack_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_air_attack_count", 0)
+                            )
+                            monitor_data["opening_air_attack_skip_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_air_attack_skip_count", 0)
+                            )
+                            monitor_data["opening_air_hold_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_air_hold_count", 0)
+                            )
+                            monitor_data["opening_berserk_trigger_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_berserk_trigger_count", 0)
+                            )
+                            monitor_data["opening_berserk_skip_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_berserk_skip_count", 0)
+                            )
+                            monitor_data["opening_enemy_hero_attack_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_enemy_hero_attack_count", 0)
+                            )
+                            monitor_data["opening_enemy_hero_attack_skip_count"] = float(
+                                getattr(self.agents[monitor_side], "opening_enemy_hero_attack_skip_count", 0)
                             )
                             monitor_data["cleanse_override_count"] = float(
                                 getattr(self.agents[monitor_side], "cleanse_override_count", 0)

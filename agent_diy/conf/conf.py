@@ -38,8 +38,8 @@ class GameConfig:
     LINEUP_SAMPLING_WEIGHTS = {
         (112, 112): 1,
         (112, 133): 1,
-        (133, 112): 2,
-        (133, 133): 1,
+        (133, 112): 4,
+        (133, 133): 3,
     }
     LEVEL_MAX_EXP = {
         1: 160,
@@ -102,6 +102,14 @@ class GameConfig:
         # Small safe-window shaping for damaging river crab before the sparse
         # money/exp payoff arrives.
         "river_crab_pressure": 1.0,
+        # Early opening offense: after the scripted opening exits on enemy
+        # contact, reward attacking the enemy hero when they overstep into our
+        # half. Kept small and capped in reward_process.
+        "early_own_half_hero_offense": 1.0,
+        # Opening trade pressure: a stronger pending-window reward for early
+        # hero trades after the scripted air-attack phase, gated to enemies
+        # overstepping into our half.
+        "opening_trade_pressure": 1.0,
         # Terminal sparse reward injected at game over. Weight stays 1.0; the
         # event value is +/- TERMINAL_WIN_REWARD.
         "win": 1.0,
@@ -120,7 +128,7 @@ class GameConfig:
     TOWER_HP_LOW_SHAPING_POWER = 1.25
     # Opening lane-control shaping. This mirrors the opening wave guard:
     # reach the first-tower area, wait at lane center, then follow our first
-    # wave from behind until enemy contact or timeout.
+    # wave from behind until enemy contact after 25s or timeout.
     OPENING_FORWARD_END_FRAME = 840
     OPENING_TOWER_TARGET_LANE = -18000.0
     OPENING_TARGET_BAND = 1200.0
@@ -150,6 +158,19 @@ class GameConfig:
         "enemy_minion_under_own_tower_count",
         "enemy_minion_defense_multiplier",
         "river_crab_pressure_count",
+        "early_own_half_offense_intent_count",
+        "early_own_half_offense_damage_count",
+        "early_own_half_offense_damage_value",
+        "opening_trade_start_count",
+        "opening_trade_visible_count",
+        "opening_trade_intent_count",
+        "opening_trade_damage_count",
+        "opening_trade_80110_good_count",
+        "opening_trade_good_count",
+        "opening_trade_strong_count",
+        "opening_trade_bad_count",
+        "opening_trade_wasted_80110_count",
+        "opening_trade_reward_value",
     ]
     ACTION_DEBUG_KEY_LIST = [
         "action_noop_count",
@@ -187,7 +208,7 @@ class GameConfig:
     LUBAN_SKILL1_SOLDIER_AIM_RADIUS = 1800.0
     CLEANSE_WINDOW_FRAMES = 300
     DI_RENJIE_CLEANSE_RETRY_WINDOW = 20
-    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 15
+    DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_START = 20
     DI_RENJIE_SKILL2_UNMASK_AFTER_ULT_END = 420
     DI_RENJIE_SKILL3_MISS_WINDOW = 30
     DI_RENJIE_SKILL3_FOLLOWUP_WINDOW_EARLY = 60
@@ -255,14 +276,53 @@ class GameConfig:
     OPENING_UNSTUCK_MIN_MOVE = 30.0
     OPENING_UNSTUCK_COOLDOWN_FRAMES = 5
     OPENING_UNSTUCK_FORWARD_DELTA = 2000.0
+    OPENING_WAVE_GUARD_WIDTH_PULL_FRAME = 450
     OPENING_WAVE_GUARD_START_FRAME = 480
-    OPENING_WAVE_GUARD_FOLLOW_FRAME = 630
+    OPENING_WAVE_GUARD_AIR_ATTACK_START_FRAME = 540
+    OPENING_WAVE_GUARD_FOLLOW_FRAME = 686
+    OPENING_WAVE_GUARD_CONTACT_EXIT_FRAME = 750
+    OPENING_WAVE_GUARD_HERO_BERSERK_END_FRAME = 810
     OPENING_WAVE_GUARD_END_FRAME = 840
     OPENING_WAVE_GUARD_ACTIVATE_LANE = -18000.0
     OPENING_WAVE_GUARD_WAIT_LANE = -16000.0
     OPENING_WAVE_GUARD_TARGET_WIDTH = 0.0
+    OPENING_WAVE_GUARD_FOLLOW_WIDTH = 3500.0
     OPENING_WAVE_GUARD_APPROACH_WIDTH_LIMIT = 4000.0
-    OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE = 1200.0
+    OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE = 2500.0
+    OPENING_AIR_ATTACK_FRAMES = [540, 575, 610, 645]
+    OPENING_AIR_ATTACK_START_FRAMES_BY_HERO = {112: 540, 133: 510}
+    OPENING_AIR_ATTACK_COUNTS_BY_HERO = {112: 5, 133: 6}
+    OPENING_AIR_ATTACK_INTERVAL_FRAMES = 35
+    OPENING_WAVE_GUARD_FORWARD_DELTA = 2500.0
+    OPENING_BERSERK_ENEMY_LANE_MAX = -2000.0
+    OPENING_BERSERK_ENEMY_DISTANCE = 8800.0
+    EARLY_OFFENSE_ENEMY_LANE_MAX = -2500.0
+    EARLY_OFFENSE_INTENT_REWARD = 0.01
+    EARLY_OFFENSE_DAMAGE_SCALE = 0.30
+    EARLY_OFFENSE_DAMAGE_REWARD_CAP = 0.04
+    EARLY_OFFENSE_TOTAL_CAP = 0.35
+    EARLY_OFFENSE_INTENT_CAP = 0.15
+    EARLY_OFFENSE_DAMAGE_CAP = 0.30
+    OPENING_TRADE_WINDOW_FRAMES = 90
+    OPENING_TRADE_ENEMY_LANE_MAX = -2500.0
+    OPENING_TRADE_VISIBLE_REWARD = 0.02
+    OPENING_TRADE_VISIBLE_CAP = 0.10
+    OPENING_TRADE_INTENT_REWARD = 0.03
+    OPENING_TRADE_INTENT_CAP = 0.24
+    OPENING_TRADE_DAMAGE_SCALE = 0.60
+    OPENING_TRADE_DAMAGE_REWARD_CAP = 0.08
+    OPENING_TRADE_DAMAGE_CAP = 0.60
+    OPENING_TRADE_TOTAL_CAP = 1.0
+    OPENING_TRADE_80110_INTERACTION_REWARD = 0.15
+    OPENING_TRADE_GOOD_DAMAGE_HP_RATIO = 0.12
+    OPENING_TRADE_STRONG_DAMAGE_HP_RATIO = 0.20
+    OPENING_TRADE_GOOD_INTERACTION_COUNT = 3
+    OPENING_TRADE_GOOD_REWARD = 0.35
+    OPENING_TRADE_STRONG_REWARD = 0.60
+    OPENING_TRADE_BAD_DAMAGE_IN_RATIO = 1.5
+    OPENING_TRADE_BAD_DAMAGE_IN_HP_RATIO = 0.20
+    OPENING_TRADE_BAD_REWARD = -0.25
+    OPENING_TRADE_WASTED_80110_REWARD = -0.35
     FORCE_HOME_DISABLE_MONEY_TOTAL = 2900
     FORCE_HOME_HP_TRIGGER_PRE_CANNON = 0.20
     FORCE_HOME_HP_TRIGGER = 0.20
@@ -310,6 +370,8 @@ class GameConfig:
         "enemy_minion_tower_front": 0.0,
         "enemy_minion_under_own_tower": 0.0,
         "river_crab_pressure": 0.0,
+        "early_own_half_hero_offense": 0.0,
+        "opening_trade_pressure": 0.0,
         "win": 0.0,
         "duel_summoner_timing": 0.0,
         "no_op_streak_penalty": 0.0,

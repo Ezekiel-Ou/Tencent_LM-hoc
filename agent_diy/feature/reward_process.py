@@ -32,6 +32,8 @@ SCENARIO_REWARD_KEYS = {
     "enemy_minion_tower_front",
     "enemy_minion_under_own_tower",
     "river_crab_pressure",
+    "early_own_half_hero_offense",
+    "opening_trade_pressure",
 }
 
 
@@ -172,6 +174,20 @@ class GameRewardManager:
         self._enemy_minion_tower_front_value = 0.0
         self._enemy_minion_under_own_tower_value = 0.0
         self._river_crab_pressure_value = 0.0
+        self._early_own_half_hero_offense_value = 0.0
+        self._early_own_half_offense_debug = self._empty_early_own_half_offense_debug()
+        self._early_own_half_offense_intent_total = 0.0
+        self._early_own_half_offense_damage_total = 0.0
+        self._early_own_half_offense_total = 0.0
+        self._opening_trade_pressure_value = 0.0
+        self._opening_trade_debug = self._empty_opening_trade_debug()
+        self._opening_trade_visible_total = 0.0
+        self._opening_trade_intent_total = 0.0
+        self._opening_trade_damage_total = 0.0
+        self._opening_trade_total = 0.0
+        self._pending_opening_trade = None
+        self._opening_contact_exit_frame = None
+        self.last_action_context = None
         self._prev_enemy_tower_hp_for_push = None
         self._prev_main_enemy_tower_dist = None
         self._last_tower_push_eval_frame = -10000
@@ -199,8 +215,13 @@ class GameRewardManager:
     def record_action_context(self, frame_data, action):
         """Record pre-step action context used by delayed reward detectors."""
         self.last_luban_skill1_action_context = None
+        self.last_action_context = None
         if not isinstance(action, (list, tuple)) or len(action) < 6:
             return
+        self.last_action_context = {
+            "button": int(action[0]),
+            "target": int(action[5]),
+        }
         if int(action[0]) != 4:
             return
         main_hero = self._find_main_hero(frame_data)
@@ -315,6 +336,16 @@ class GameRewardManager:
                     reward_struct.cur_frame_value = float(self._river_crab_pressure_value)
                 else:
                     reward_struct.cur_frame_value = 0.0
+            elif reward_name == "early_own_half_hero_offense":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._early_own_half_hero_offense_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
+            elif reward_name == "opening_trade_pressure":
+                if calc_frame_map is self.m_main_calc_frame_map:
+                    reward_struct.cur_frame_value = float(self._opening_trade_pressure_value)
+                else:
+                    reward_struct.cur_frame_value = 0.0
             elif reward_name in ("win", "no_op_streak_penalty"):
                 reward_struct.cur_frame_value = 0.0
 
@@ -385,18 +416,24 @@ class GameRewardManager:
         clip = float(GameConfig.OPENING_POSITION_CLIP)
         return max(min(score, 0.0), -clip)
 
-    def _opening_forward_stage(self, frame_no):
+    def _opening_forward_stage(self, frame_no, main_hero=None):
         frame_no = int(frame_no or 0)
+        air_start_frame = self._opening_air_attack_start_frame(main_hero)
+        air_end_frame = self._opening_air_attack_follow_frame(main_hero)
+        if int(GameConfig.OPENING_WAVE_GUARD_WIDTH_PULL_FRAME) <= frame_no < air_start_frame:
+            return "width_pull"
         if frame_no < int(GameConfig.OPENING_WAVE_GUARD_START_FRAME):
             return "approach_tower"
-        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_FOLLOW_FRAME):
+        if frame_no < air_start_frame:
             return "wait_tower"
+        if frame_no < air_end_frame:
+            return "air_attack"
         if frame_no < int(GameConfig.OPENING_FORWARD_END_FRAME):
             return "follow_wave"
         return "off"
 
     def _opening_forward_target(self, frame_data, frame_no, main_hero):
-        stage = self._opening_forward_stage(frame_no)
+        stage = self._opening_forward_stage(frame_no, main_hero)
         if stage == "approach_tower":
             return (
                 float(GameConfig.OPENING_TOWER_TARGET_LANE),
@@ -407,22 +444,38 @@ class GameRewardManager:
                 float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
                 float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
             )
+        if stage == "width_pull":
+            return (
+                float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
+                float(GameConfig.OPENING_WAVE_GUARD_FOLLOW_WIDTH),
+            )
         if stage == "follow_wave":
-            front_minion = self._front_own_minion(frame_data)
-            if front_minion is None:
-                target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
-            else:
-                front_lane = self._own_perspective_lane(front_minion)
-                target_lane = (
-                    float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
-                    if front_lane is None
-                    else float(front_lane) - float(GameConfig.OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE)
-                )
+            current_lane = self._own_perspective_lane(main_hero)
+            target_lane = (
+                float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+                if current_lane is None
+                else float(current_lane) + float(GameConfig.OPENING_WAVE_GUARD_FORWARD_DELTA)
+            )
             return (
                 target_lane,
-                float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
+                float(GameConfig.OPENING_WAVE_GUARD_FOLLOW_WIDTH),
             )
         return None
+
+    def _opening_air_attack_start_frame(self, main_hero=None):
+        hero_id = int(_get_any(main_hero or {}, ["config_id", "configId", "hero_id", "heroId"], 0) or 0)
+        starts = getattr(GameConfig, "OPENING_AIR_ATTACK_START_FRAMES_BY_HERO", {}) or {}
+        return int(starts.get(hero_id, GameConfig.OPENING_WAVE_GUARD_AIR_ATTACK_START_FRAME))
+
+    def _opening_air_attack_follow_frame(self, main_hero=None):
+        hero_id = int(_get_any(main_hero or {}, ["config_id", "configId", "hero_id", "heroId"], 0) or 0)
+        counts = getattr(GameConfig, "OPENING_AIR_ATTACK_COUNTS_BY_HERO", {}) or {}
+        count = int(counts.get(hero_id, len(GameConfig.OPENING_AIR_ATTACK_FRAMES)))
+        return (
+            self._opening_air_attack_start_frame(main_hero)
+            + int(GameConfig.OPENING_AIR_ATTACK_INTERVAL_FRAMES) * max(count - 1, 0)
+            + 1
+        )
 
     def _own_perspective_lane(self, unit):
         collider = _get(unit or {}, "collider", {}) or {}
@@ -489,21 +542,71 @@ class GameRewardManager:
             return True
         return False
 
-    def _front_own_minion(self, frame_data):
+    def _second_front_own_minion(self, frame_data):
         if frame_data is None:
             return None
-        front_minion = None
-        front_lane = None
+        minions = []
         main_camp = _camp_key(getattr(self, "main_hero_camp", None))
+        if main_camp not in (1, 2):
+            return None
         for npc in frame_data.get("npc_states", []) or []:
             if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
                 continue
             if float(_hp(npc) or 0) <= 0:
                 continue
             npc_camp = _camp_key(_get(npc, "camp", None))
-            if main_camp in (1, 2) and npc_camp != main_camp:
+            if npc_camp != main_camp:
                 continue
-            lane = self._own_perspective_lane(npc)
+            lane = self._lane_for_camp(npc, main_camp)
+            if lane is None:
+                continue
+            minions.append((float(lane), npc))
+        if not minions:
+            return None
+        minions.sort(key=lambda item: item[0], reverse=True)
+        return minions[1][1] if len(minions) >= 2 else minions[0][1]
+
+    def _back_own_minion(self, frame_data):
+        if frame_data is None:
+            return None
+        back_minion = None
+        back_lane = None
+        main_camp = _camp_key(getattr(self, "main_hero_camp", None))
+        if main_camp not in (1, 2):
+            return None
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            npc_camp = _camp_key(_get(npc, "camp", None))
+            if npc_camp != main_camp:
+                continue
+            lane = self._lane_for_camp(npc, main_camp)
+            if lane is None:
+                continue
+            if back_lane is None or float(lane) < back_lane:
+                back_lane = float(lane)
+                back_minion = npc
+        return back_minion
+
+    def _front_own_minion(self, frame_data):
+        if frame_data is None:
+            return None
+        front_minion = None
+        front_lane = None
+        main_camp = _camp_key(getattr(self, "main_hero_camp", None))
+        if main_camp not in (1, 2):
+            return None
+        for npc in frame_data.get("npc_states", []) or []:
+            if _get_any(npc, ["sub_type", "subType"], None) not in SOLDIER_SUB_TYPES:
+                continue
+            if float(_hp(npc) or 0) <= 0:
+                continue
+            npc_camp = _camp_key(_get(npc, "camp", None))
+            if npc_camp != main_camp:
+                continue
+            lane = self._lane_for_camp(npc, main_camp)
             if lane is None:
                 continue
             if front_lane is None or float(lane) > front_lane:
@@ -547,6 +650,12 @@ class GameRewardManager:
         self._river_crab_pressure_value = self._detect_river_crab_pressure(
             frame_data, main_hero, enemy_hero, main_tower, enemy_tower, own_soldiers_in_enemy_tower
         )
+        self._early_own_half_hero_offense_value = self._detect_early_own_half_hero_offense(
+            frame_data, main_hero, enemy_hero, frame_no
+        )
+        self._opening_trade_pressure_value = self._detect_opening_trade_pressure(
+            frame_data, main_hero, enemy_hero, frame_no
+        )
         (
             self._enemy_minion_tower_front_value,
             self._enemy_minion_under_own_tower_value,
@@ -573,8 +682,8 @@ class GameRewardManager:
             elif reward_name == "exp" and main_hero is not None and _get(main_hero, "level", 1) >= 15:
                 reward_struct.value = 0.0
             elif reward_name == "forward":
-                stage = self._opening_forward_stage(frame_no)
-                if stage in ("approach_tower", "wait_tower", "follow_wave"):
+                stage = self._opening_forward_stage(frame_no, main_hero)
+                if stage in ("approach_tower", "wait_tower", "width_pull", "follow_wave"):
                     reward_struct.value = self.m_main_calc_frame_map[reward_name].cur_frame_value
                 else:
                     reward_struct.value = 0.0
@@ -630,6 +739,8 @@ class GameRewardManager:
         reward_dict.update(self._duel_summoner_debug)
         reward_dict.update(self._enemy_minion_defense_debug)
         reward_dict.update(self._river_crab_pressure_debug)
+        reward_dict.update(self._early_own_half_offense_debug)
+        reward_dict.update(self._opening_trade_debug)
         reward_dict["direnjie_skill3_followup_count"] = float(self._direnjie_skill3_followup_count_value)
         reward_dict["direnjie_skill3_miss_count"] = float(self._direnjie_skill3_miss_count_value)
         self.has_last_frame = True
@@ -759,6 +870,27 @@ class GameRewardManager:
             "duel_summoner_wasted_count": 0.0,
             "duel_summoner_80110_cast_count": 0.0,
             "duel_summoner_80110_good_count": 0.0,
+        }
+
+    def _empty_early_own_half_offense_debug(self):
+        return {
+            "early_own_half_offense_intent_count": 0.0,
+            "early_own_half_offense_damage_count": 0.0,
+            "early_own_half_offense_damage_value": 0.0,
+        }
+
+    def _empty_opening_trade_debug(self):
+        return {
+            "opening_trade_start_count": 0.0,
+            "opening_trade_visible_count": 0.0,
+            "opening_trade_intent_count": 0.0,
+            "opening_trade_damage_count": 0.0,
+            "opening_trade_80110_good_count": 0.0,
+            "opening_trade_good_count": 0.0,
+            "opening_trade_strong_count": 0.0,
+            "opening_trade_bad_count": 0.0,
+            "opening_trade_wasted_80110_count": 0.0,
+            "opening_trade_reward_value": 0.0,
         }
 
     def _empty_enemy_minion_defense_debug(self):
@@ -1476,36 +1608,6 @@ class GameRewardManager:
                 return int(skill_id)
         return None
 
-    def _detect_berserk_timing(self, main_hero, enemy_hero, frame_no):
-        return 0.0
-
-    def _detect_berserk_no_damage_penalty(self, frame_data, main_hero, frame_no):
-        return 0.0
-
-    def _has_dealt_damage_to_enemy_units(self, frame_data, main_hero):
-        if main_hero is None:
-            return False
-        main_runtime = self._actor_runtime(main_hero)
-        if main_runtime is None:
-            return False
-        main_camp = _camp_key(_get(main_hero, "camp", None))
-
-        for hero in frame_data.get("hero_states", []) or []:
-            if hero is main_hero or _camp_key(_get(hero, "camp", None)) == main_camp:
-                continue
-            if self._unit_damaged_by_runtime(hero, main_runtime):
-                return True
-
-        for npc in frame_data.get("npc_states", []) or []:
-            sub_type = _get_any(npc, ["sub_type", "subType"], None)
-            if sub_type not in SOLDIER_SUB_TYPES and sub_type not in TOWER_SUB_TYPES:
-                continue
-            if _camp_key(_get(npc, "camp", None)) == main_camp:
-                continue
-            if self._unit_damaged_by_runtime(npc, main_runtime):
-                return True
-        return False
-
     def _unit_damaged_by_runtime(self, unit, runtime):
         for hurt in _get_any(unit or {}, ["take_hurt_infos", "takeHurtInfos"], []) or []:
             attacker = _get_any(hurt, ["atker", "attacker"], None)
@@ -1517,6 +1619,274 @@ class GameRewardManager:
             except (TypeError, ValueError):
                 continue
         return False
+
+    def _detect_early_own_half_hero_offense(self, frame_data, main_hero, enemy_hero, frame_no):
+        self._early_own_half_offense_debug = self._empty_early_own_half_offense_debug()
+        frame_no = int(frame_no or 0)
+        self._update_opening_contact_exit_frame(frame_data, main_hero, enemy_hero, frame_no)
+
+        if self._opening_contact_exit_frame is None:
+            return 0.0
+        if not (int(self._opening_contact_exit_frame) <= frame_no < int(GameConfig.OPENING_FORWARD_END_FRAME)):
+            return 0.0
+        if main_hero is None or enemy_hero is None:
+            return 0.0
+        if float(_hp(main_hero) or 0) <= 0 or float(_hp(enemy_hero) or 0) <= 0:
+            return 0.0
+        if not self._enemy_hero_visible_to_main(frame_data, main_hero):
+            return 0.0
+
+        main_camp = _camp_key(_get(main_hero or {}, "camp", self.main_hero_camp))
+        enemy_lane = self._lane_for_camp(enemy_hero, main_camp)
+        if enemy_lane is None or float(enemy_lane) >= float(GameConfig.EARLY_OFFENSE_ENEMY_LANE_MAX):
+            return 0.0
+
+        reward_value = 0.0
+        if self._last_action_attacks_enemy_hero():
+            reward_value += self._grant_early_offense_intent()
+
+        damage = self._early_offense_damage_amount(main_hero, enemy_hero)
+        if damage > 0.0:
+            reward_value += self._grant_early_offense_damage(damage, enemy_hero)
+
+        remaining_total = max(0.0, float(GameConfig.EARLY_OFFENSE_TOTAL_CAP) - self._early_own_half_offense_total)
+        reward_value = min(reward_value, remaining_total)
+        self._early_own_half_offense_total += reward_value
+        return reward_value
+
+    def _update_opening_contact_exit_frame(self, frame_data, main_hero, enemy_hero, frame_no):
+        if self._opening_contact_exit_frame is not None:
+            return
+        if frame_no <= int(GameConfig.OPENING_WAVE_GUARD_CONTACT_EXIT_FRAME):
+            return
+        if frame_no >= int(GameConfig.OPENING_FORWARD_END_FRAME):
+            return
+        if main_hero is None:
+            return
+        if self._enemy_hero_visible_to_main(frame_data, main_hero) or self._enemy_minion_visible_to_main(
+            frame_data, main_hero
+        ):
+            self._opening_contact_exit_frame = frame_no
+
+    def _last_action_attacks_enemy_hero(self):
+        action = self.last_action_context or {}
+        button = int(action.get("button", -1))
+        target = int(action.get("target", -1))
+        return button in (3, 4, 5, 6, 10) and target == 1
+
+    def _grant_early_offense_intent(self):
+        remaining = max(0.0, float(GameConfig.EARLY_OFFENSE_INTENT_CAP) - self._early_own_half_offense_intent_total)
+        value = min(float(GameConfig.EARLY_OFFENSE_INTENT_REWARD), remaining)
+        if value > 0.0:
+            self._early_own_half_offense_intent_total += value
+            self._early_own_half_offense_debug["early_own_half_offense_intent_count"] = 1.0
+        return value
+
+    def _early_offense_damage_amount(self, main_hero, enemy_hero):
+        main_runtime = self._actor_runtime(main_hero)
+        direct_damage, _ = self._hero_damage_from_runtime(enemy_hero, main_runtime)
+        if direct_damage > 0.0:
+            return direct_damage
+        return max(0.0, float(self.main_total_hurt_to_hero_delta or 0.0))
+
+    def _grant_early_offense_damage(self, damage, enemy_hero):
+        enemy_max_hp = max(float(_max_hp(enemy_hero) or 1.0), 1.0)
+        raw_value = min(
+            float(damage) / enemy_max_hp * float(GameConfig.EARLY_OFFENSE_DAMAGE_SCALE),
+            float(GameConfig.EARLY_OFFENSE_DAMAGE_REWARD_CAP),
+        )
+        remaining = max(0.0, float(GameConfig.EARLY_OFFENSE_DAMAGE_CAP) - self._early_own_half_offense_damage_total)
+        value = min(raw_value, remaining)
+        if value > 0.0:
+            self._early_own_half_offense_damage_total += value
+            self._early_own_half_offense_debug["early_own_half_offense_damage_count"] = 1.0
+            self._early_own_half_offense_debug["early_own_half_offense_damage_value"] = float(damage)
+        return value
+
+    def _detect_opening_trade_pressure(self, frame_data, main_hero, enemy_hero, frame_no):
+        self._opening_trade_debug = self._empty_opening_trade_debug()
+        frame_no = int(frame_no or 0)
+        value = 0.0
+
+        if self._pending_opening_trade is not None:
+            self._update_opening_trade_check(main_hero, enemy_hero)
+            if self._opening_trade_should_finish(frame_data, main_hero, enemy_hero, frame_no):
+                value += self._finish_opening_trade_check(frame_data, main_hero, enemy_hero)
+                self._pending_opening_trade = None
+
+        if not self._opening_trade_context(frame_data, main_hero, enemy_hero, frame_no):
+            self._opening_trade_debug["opening_trade_reward_value"] = value
+            return value
+
+        used_skill_id = self._used_duel_summoner_skill(main_hero)
+        distance = self._distance_to_entity(main_hero, enemy_hero)
+        in_range = distance is not None and float(distance) < float(GameConfig.OPENING_BERSERK_ENEMY_DISTANCE)
+        attacks_enemy_hero = self._last_action_attacks_enemy_hero()
+        should_start = in_range or attacks_enemy_hero or used_skill_id == GameConfig.BERSERK_SKILL_ID
+        started_trade = False
+        if should_start and self._pending_opening_trade is None:
+            self._start_opening_trade_check(main_hero, enemy_hero, frame_no, used_skill_id)
+            started_trade = True
+        if started_trade:
+            self._update_opening_trade_check(main_hero, enemy_hero)
+
+        if in_range:
+            value += self._grant_opening_trade_visible()
+        if attacks_enemy_hero:
+            value += self._grant_opening_trade_intent()
+
+        damage_out, _, _, _ = self._opening_trade_damage_pair(main_hero, enemy_hero)
+        if damage_out > 0.0:
+            value += self._grant_opening_trade_damage(damage_out, enemy_hero)
+
+        self._opening_trade_debug["opening_trade_reward_value"] = value
+        return value
+
+    def _opening_trade_context(self, frame_data, main_hero, enemy_hero, frame_no):
+        if main_hero is None or enemy_hero is None:
+            return False
+        if float(_hp(main_hero) or 0) <= 0 or float(_hp(enemy_hero) or 0) <= 0:
+            return False
+        if not self._enemy_hero_visible_to_main(frame_data, main_hero):
+            return False
+        if int(frame_no or 0) < self._opening_air_attack_follow_frame(main_hero):
+            return False
+        if int(frame_no or 0) >= int(GameConfig.OPENING_FORWARD_END_FRAME):
+            return False
+        main_camp = _camp_key(_get(main_hero or {}, "camp", self.main_hero_camp))
+        enemy_lane = self._lane_for_camp(enemy_hero, main_camp)
+        return enemy_lane is not None and float(enemy_lane) < float(GameConfig.OPENING_TRADE_ENEMY_LANE_MAX)
+
+    def _start_opening_trade_check(self, main_hero, enemy_hero, frame_no, skill_id):
+        self._pending_opening_trade = {
+            "start_frame": int(frame_no or 0),
+            "main_max_hp": max(float(_max_hp(main_hero) or 0), 1.0),
+            "enemy_max_hp": max(float(_max_hp(enemy_hero) or 0), 1.0),
+            "damage_out": 0.0,
+            "damage_in": 0.0,
+            "interaction_count": 0,
+            "min_distance": self._distance_to_entity(main_hero, enemy_hero),
+            "used_80110": int(skill_id or 0) == int(GameConfig.BERSERK_SKILL_ID),
+        }
+        self._opening_trade_debug["opening_trade_start_count"] = 1.0
+
+    def _update_opening_trade_check(self, main_hero, enemy_hero):
+        pending = self._pending_opening_trade
+        if pending is None:
+            return
+
+        distance = self._distance_to_entity(main_hero, enemy_hero)
+        if distance is not None:
+            previous = pending.get("min_distance")
+            pending["min_distance"] = distance if previous is None else min(float(previous), distance)
+        if self._used_duel_summoner_skill(main_hero) == GameConfig.BERSERK_SKILL_ID:
+            pending["used_80110"] = True
+
+        damage_out, damage_in, events_out, events_in = self._opening_trade_damage_pair(main_hero, enemy_hero)
+        pending["damage_out"] += damage_out
+        pending["damage_in"] += damage_in
+        pending["interaction_count"] += events_out + events_in
+
+    def _opening_trade_damage_pair(self, main_hero, enemy_hero):
+        main_runtime = self._actor_runtime(main_hero)
+        enemy_runtime = self._actor_runtime(enemy_hero)
+        damage_out, events_out = self._hero_damage_from_runtime(enemy_hero, main_runtime)
+        damage_in, events_in = self._hero_damage_from_runtime(main_hero, enemy_runtime)
+        if damage_out <= 0.0 and self.main_total_hurt_to_hero_delta > 0:
+            damage_out = float(self.main_total_hurt_to_hero_delta or 0.0)
+            events_out = 1
+        return damage_out, damage_in, events_out, events_in
+
+    def _opening_trade_should_finish(self, frame_data, main_hero, enemy_hero, frame_no):
+        pending = self._pending_opening_trade or {}
+        elapsed = int(frame_no or 0) - int(pending.get("start_frame", frame_no))
+        if elapsed >= int(GameConfig.OPENING_TRADE_WINDOW_FRAMES):
+            return True
+        if main_hero is not None and float(_hp(main_hero) or 0) <= 0:
+            return True
+        if enemy_hero is not None and float(_hp(enemy_hero) or 0) <= 0:
+            return True
+        return self._frame_action_has_enemy_hero_death(frame_data, main_hero, enemy_hero)
+
+    def _finish_opening_trade_check(self, frame_data, main_hero, enemy_hero):
+        pending = self._pending_opening_trade or {}
+        damage_out = float(pending.get("damage_out", 0.0) or 0.0)
+        damage_in = float(pending.get("damage_in", 0.0) or 0.0)
+        interaction_count = int(pending.get("interaction_count", 0) or 0)
+        min_distance = pending.get("min_distance")
+        main_max_hp = max(float(pending.get("main_max_hp", 1.0) or 1.0), 1.0)
+        enemy_max_hp = max(float(pending.get("enemy_max_hp", 1.0) or 1.0), 1.0)
+        in_range = min_distance is not None and float(min_distance) < float(GameConfig.OPENING_BERSERK_ENEMY_DISTANCE)
+        enemy_dead = (
+            enemy_hero is not None and float(_hp(enemy_hero) or 0) <= 0
+        ) or self._frame_action_has_enemy_hero_death(frame_data, main_hero, enemy_hero)
+
+        value = 0.0
+        had_interaction = interaction_count > 0 or damage_out > 0.0 or damage_in > 0.0
+        if bool(pending.get("used_80110", False)) and had_interaction:
+            value += self._cap_opening_trade_reward(float(GameConfig.OPENING_TRADE_80110_INTERACTION_REWARD))
+            self._opening_trade_debug["opening_trade_80110_good_count"] = 1.0
+
+        strong_damage_met = damage_out >= enemy_max_hp * float(GameConfig.OPENING_TRADE_STRONG_DAMAGE_HP_RATIO)
+        good_damage_met = damage_out >= enemy_max_hp * float(GameConfig.OPENING_TRADE_GOOD_DAMAGE_HP_RATIO)
+        good_interaction_met = interaction_count >= int(GameConfig.OPENING_TRADE_GOOD_INTERACTION_COUNT)
+        bad_trade = (
+            damage_in >= main_max_hp * float(GameConfig.OPENING_TRADE_BAD_DAMAGE_IN_HP_RATIO)
+            and damage_in > damage_out * float(GameConfig.OPENING_TRADE_BAD_DAMAGE_IN_RATIO)
+        )
+
+        if enemy_dead or strong_damage_met:
+            value += self._cap_opening_trade_reward(float(GameConfig.OPENING_TRADE_STRONG_REWARD))
+            self._opening_trade_debug["opening_trade_strong_count"] = 1.0
+        elif in_range and good_damage_met and good_interaction_met:
+            value += self._cap_opening_trade_reward(float(GameConfig.OPENING_TRADE_GOOD_REWARD))
+            self._opening_trade_debug["opening_trade_good_count"] = 1.0
+        elif bad_trade:
+            value += float(GameConfig.OPENING_TRADE_BAD_REWARD)
+            self._opening_trade_debug["opening_trade_bad_count"] = 1.0
+        elif bool(pending.get("used_80110", False)) and not had_interaction:
+            value += float(GameConfig.OPENING_TRADE_WASTED_80110_REWARD)
+            self._opening_trade_debug["opening_trade_wasted_80110_count"] = 1.0
+        return value
+
+    def _grant_opening_trade_visible(self):
+        remaining = max(0.0, float(GameConfig.OPENING_TRADE_VISIBLE_CAP) - self._opening_trade_visible_total)
+        value = min(float(GameConfig.OPENING_TRADE_VISIBLE_REWARD), remaining)
+        value = self._cap_opening_trade_reward(value)
+        if value > 0.0:
+            self._opening_trade_visible_total += value
+            self._opening_trade_debug["opening_trade_visible_count"] = 1.0
+        return value
+
+    def _grant_opening_trade_intent(self):
+        remaining = max(0.0, float(GameConfig.OPENING_TRADE_INTENT_CAP) - self._opening_trade_intent_total)
+        value = min(float(GameConfig.OPENING_TRADE_INTENT_REWARD), remaining)
+        value = self._cap_opening_trade_reward(value)
+        if value > 0.0:
+            self._opening_trade_intent_total += value
+            self._opening_trade_debug["opening_trade_intent_count"] = 1.0
+        return value
+
+    def _grant_opening_trade_damage(self, damage, enemy_hero):
+        enemy_max_hp = max(float(_max_hp(enemy_hero) or 1.0), 1.0)
+        raw_value = min(
+            float(damage) / enemy_max_hp * float(GameConfig.OPENING_TRADE_DAMAGE_SCALE),
+            float(GameConfig.OPENING_TRADE_DAMAGE_REWARD_CAP),
+        )
+        remaining_damage = max(0.0, float(GameConfig.OPENING_TRADE_DAMAGE_CAP) - self._opening_trade_damage_total)
+        value = min(raw_value, remaining_damage)
+        value = self._cap_opening_trade_reward(value)
+        if value > 0.0:
+            self._opening_trade_damage_total += value
+            self._opening_trade_debug["opening_trade_damage_count"] = 1.0
+        return value
+
+    def _cap_opening_trade_reward(self, value):
+        value = max(float(value or 0.0), 0.0)
+        remaining_total = max(0.0, float(GameConfig.OPENING_TRADE_TOTAL_CAP) - self._opening_trade_total)
+        value = min(value, remaining_total)
+        self._opening_trade_total += value
+        return value
 
     def _detect_minion_tower_push(self, frame_data, main_hero, enemy_hero, enemy_tower, own_soldier_count):
         frame_no = int(frame_data.get("frame_no", frame_data.get("frameNo", 0)) or 0)

@@ -38,9 +38,15 @@ def build_monitor():
         config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
 
-    config = config.add_panel(name="match_result", name_en="match_result", type="line")
+    config = config.add_panel(name="match_eval", name_en="match_eval", type="line")
     for metric_name, precision in (
         ("reward", "0.01"),
+    ):
+        config = _add_metric(config, metric_name, precision)
+    config = config.end_panel()
+
+    config = config.add_panel(name="match_result", name_en="match_result", type="line")
+    for metric_name, precision in (
         ("reward_win", "0.0001"),
     ):
         config = _add_metric(config, metric_name, precision)
@@ -58,6 +64,8 @@ def build_monitor():
         "reward_enemy_minion_tower_front",
         "reward_enemy_minion_under_own_tower",
         "reward_river_crab_pressure",
+        "reward_early_own_half_hero_offense",
+        "reward_opening_trade_pressure",
         "reward_forward",
     ):
         config = _add_metric(config, metric_name, "0.0001")
@@ -69,6 +77,19 @@ def build_monitor():
         ("enemy_minion_under_own_tower_count", "0.01"),
         ("enemy_minion_defense_multiplier", "0.01"),
         ("river_crab_pressure_count", "0.01"),
+        ("early_own_half_offense_intent_count", "0.01"),
+        ("early_own_half_offense_damage_count", "0.01"),
+        ("early_own_half_offense_damage_value", "0.01"),
+        ("opening_trade_start_count", "0.01"),
+        ("opening_trade_visible_count", "0.01"),
+        ("opening_trade_intent_count", "0.01"),
+        ("opening_trade_damage_count", "0.01"),
+        ("opening_trade_80110_good_count", "0.01"),
+        ("opening_trade_good_count", "0.01"),
+        ("opening_trade_strong_count", "0.01"),
+        ("opening_trade_bad_count", "0.01"),
+        ("opening_trade_wasted_80110_count", "0.01"),
+        ("opening_trade_reward_value", "0.01"),
     ):
         config = _add_metric(config, metric_name, precision)
     config = config.end_panel()
@@ -142,30 +163,60 @@ def build_monitor():
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
 
-    config = config.add_panel(name="rule_intervention", name_en="rule_intervention", type="line")
+    config = config.add_panel(name="rule_overview", name_en="rule_overview", type="line")
     for metric_name in (
         "rule_override_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="rule_force_home", name_en="rule_force_home", type="line")
+    for metric_name in (
         "force_home_trigger_count",
         "force_home_override_count",
         "force_home_start_count",
         "force_home_retreat_count",
         "force_home_return_count",
-        "force_home_no_emy_minion_cnt",
+        "force_home_no_enemy_minion_cnt",
         "force_home_own_wave_cnt",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="rule_opening", name_en="rule_opening", type="line")
+    for metric_name in (
         "opening_unstuck_count",
+        "opening_air_attack_count",
+        "opening_air_attack_skip_count",
+        "opening_air_hold_count",
+        "opening_berserk_trigger_count",
+        "opening_berserk_skip_count",
+        "opening_enemy_hero_attack_count",
+        "opening_enemy_hero_attack_skip_count",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="rule_direnjie_skill2", name_en="rule_direnjie_skill2", type="line")
+    for metric_name in (
         "cleanse_override_count",
         "skill2_blocked_count",
         "skill2_total_cast_count",
         "skill2_cast_outside_window_count",
         "skill2_cleanse_rate",
+    ):
+        config = _add_metric(config, metric_name, "0.01")
+    config = config.end_panel()
+
+    config = config.add_panel(name="rule_luban_skill1", name_en="rule_luban_skill1", type="line")
+    for metric_name in (
         "luban_skill1_aim_assist_count",
     ):
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
 
-    config = config.add_panel(name="summoner_recover", name_en="summoner_recover", type="line")
+    config = config.add_panel(name="summoner_duel", name_en="summoner_duel", type="line")
     for metric_name, precision in (
-        ("selected_summoner_80110", "0.01"),
         ("duel_summoner_cast_count", "0.01"),
         ("duel_summoner_good_count", "0.01"),
         ("duel_summoner_mid_count", "0.01"),
@@ -174,6 +225,12 @@ def build_monitor():
         ("duel_summoner_wasted_count", "0.01"),
         ("duel_summoner_80110_cast_count", "0.01"),
         ("duel_summoner_80110_good_count", "0.01"),
+    ):
+        config = _add_metric(config, metric_name, precision)
+    config = config.end_panel()
+
+    config = config.add_panel(name="recover_cake", name_en="recover_cake", type="line")
+    for metric_name, precision in (
         ("reward_cake_pickup", "0.0001"),
         ("reward_recover_skill_low_hp", "0.0001"),
         ("cake_high_hp_penalty_count", "0.01"),
@@ -181,6 +238,12 @@ def build_monitor():
         ("recover_success_count", "0.01"),
         ("recover_interrupted_count", "0.01"),
         ("recover_high_hp_penalty_count", "0.01"),
+    ):
+        config = _add_metric(config, metric_name, precision)
+    config = config.end_panel()
+
+    config = config.add_panel(name="counterplay_cleanse", name_en="counterplay_cleanse", type="line")
+    for metric_name, precision in (
         ("enemy_cleansed_us_count", "0.01"),
     ):
         config = _add_metric(config, metric_name, precision)

@@ -107,10 +107,7 @@ class Agent(BaseAgent):
 
         # Force-home rule state (used by _maybe_force_home).
         self.own_cake_exists = False
-        self.own_cake_seen_once = False
         self.last_own_cake_pos = None
-        self.last_own_cake_disappear_frame = -10000
-        self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
         self.prev_enemy_dead_cnt = 0
         self.last_enemy_hero_kill_frame = -10000
@@ -154,15 +151,23 @@ class Agent(BaseAgent):
         self.opening_wave_guard_exit_enemy_hero_count = 0
         self.opening_wave_guard_exit_enemy_minion_count = 0
         self.opening_wave_guard_exit_timeout_count = 0
+        self.opening_air_attack_count = 0
+        self.opening_air_attack_skip_count = 0
+        self.opening_air_attack_done_frames = set()
+        self.opening_air_hold_count = 0
+        self.opening_berserk_trigger_count = 0
+        self.opening_berserk_skip_count = 0
+        self.opening_enemy_hero_attack_count = 0
+        self.opening_enemy_hero_attack_skip_count = 0
+        self.opening_enemy_hero_attack_pending = False
+        self.opening_hero_engage_done = False
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
         self.skill2_total_cast_count = 0
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
-        self._pending_cleanse_frame = None
         self._cleanse_retry_until_frame = None
-        self._cleanse_retry_hit_frame = None
         self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
@@ -282,10 +287,7 @@ class Agent(BaseAgent):
         self.feature_processes = FeatureProcess(self.hero_camp, logger=self.logger)
         # Reset force-home rule state per episode.
         self.own_cake_exists = False
-        self.own_cake_seen_once = False
         self.last_own_cake_pos = None
-        self.last_own_cake_disappear_frame = -10000
-        self.next_own_cake_frame = None
         self.prev_dead_cnt = 0
         self.prev_enemy_dead_cnt = 0
         self.last_enemy_hero_kill_frame = -10000
@@ -329,15 +331,23 @@ class Agent(BaseAgent):
         self.opening_wave_guard_exit_enemy_hero_count = 0
         self.opening_wave_guard_exit_enemy_minion_count = 0
         self.opening_wave_guard_exit_timeout_count = 0
+        self.opening_air_attack_count = 0
+        self.opening_air_attack_skip_count = 0
+        self.opening_air_attack_done_frames = set()
+        self.opening_air_hold_count = 0
+        self.opening_berserk_trigger_count = 0
+        self.opening_berserk_skip_count = 0
+        self.opening_enemy_hero_attack_count = 0
+        self.opening_enemy_hero_attack_skip_count = 0
+        self.opening_enemy_hero_attack_pending = False
+        self.opening_hero_engage_done = False
         self.luban_skill1_aim_assist_count = 0
         self.cleanse_override_count = 0
         self.skill2_blocked_count = 0
         self.skill2_total_cast_count = 0
         self.skill2_cast_outside_window_count = 0
         self._enemy_ult_cast_frame = None
-        self._pending_cleanse_frame = None
         self._cleanse_retry_until_frame = None
-        self._cleanse_retry_hit_frame = None
         self._fallback_cleanse_ult_cast_frame = None
         self._prev_enemy_slot3_hit_hero_times = None
 
@@ -580,12 +590,10 @@ class Agent(BaseAgent):
         frame_state = observation.get("frame_state", {}) or {}
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if main_hero is None or enemy_hero is None:
-            self._pending_cleanse_frame = None
             self._clear_cleanse_retry()
             return action
 
         if self._hero_config_id(main_hero) != 133 or self._hero_config_id(enemy_hero) != 133:
-            self._pending_cleanse_frame = None
             self._clear_cleanse_retry()
             return action
 
@@ -608,13 +616,10 @@ class Agent(BaseAgent):
         if self._cleanse_retry_until_frame is not None and frame_no <= int(self._cleanse_retry_until_frame):
             return
         window = int(GameConfig.DI_RENJIE_CLEANSE_RETRY_WINDOW)
-        self._cleanse_retry_hit_frame = frame_no
         self._cleanse_retry_until_frame = frame_no + window
-        self._pending_cleanse_frame = None
 
     def _clear_cleanse_retry(self):
         self._cleanse_retry_until_frame = None
-        self._cleanse_retry_hit_frame = None
 
     def _cleanse_retry_active(self, frame_no):
         return self._cleanse_retry_until_frame is not None and int(frame_no or 0) <= int(
@@ -754,12 +759,8 @@ class Agent(BaseAgent):
         main_hero, enemy_hero, _ = self._find_my_hero_and_tower(frame_state)
         if main_hero is None or self._unit_hp(main_hero) <= 0:
             return action
-        if self._opening_enemy_hero_visible(enemy_hero):
-            self._finish_opening_wave_guard("enemy_hero", frame_no)
-            return action
-        if self._opening_enemy_minion_visible(frame_state):
-            self._finish_opening_wave_guard("enemy_minion", frame_no)
-            return action
+        enemy_hero_visible = self._opening_enemy_hero_visible(enemy_hero)
+        enemy_minion_visible = self._opening_enemy_minion_visible(frame_state)
 
         pos = self._project_own_perspective(main_hero)
         if pos is None:
@@ -767,13 +768,40 @@ class Agent(BaseAgent):
         if frame_no >= int(GameConfig.OPENING_WAVE_GUARD_END_FRAME):
             self._finish_opening_wave_guard("timeout", frame_no)
             return action
+        air_start_frame = self._opening_air_attack_start_frame(main_hero)
         if not self.opening_wave_guard_active:
             if (
-                frame_no >= int(GameConfig.OPENING_WAVE_GUARD_START_FRAME)
+                frame_no < air_start_frame
+                and frame_no >= int(GameConfig.OPENING_WAVE_GUARD_START_FRAME)
                 and float(pos[0]) <= float(GameConfig.OPENING_WAVE_GUARD_ACTIVATE_LANE)
             ):
                 return action
             self.opening_wave_guard_active = True
+
+        if self.opening_enemy_hero_attack_pending:
+            hero_attack = self._opening_enemy_hero_attack(observation)
+            self._finish_opening_wave_guard("enemy_hero", frame_no)
+            return hero_attack if hero_attack is not None else action
+
+        air_action = self._maybe_opening_air_phase_action(observation, frame_no, main_hero)
+        if air_action is not None:
+            return air_action
+
+        if (
+            enemy_hero_visible
+            and not self.opening_hero_engage_done
+            and self._distance_between_heroes(main_hero, enemy_hero) < float(GameConfig.OPENING_BERSERK_ENEMY_DISTANCE)
+        ):
+            engage_action = self._opening_hero_engage_action(observation)
+            self.opening_hero_engage_done = True
+            if engage_action is not None:
+                return engage_action
+            self._finish_opening_wave_guard("enemy_hero", frame_no)
+            return action
+
+        if enemy_minion_visible:
+            self._finish_opening_wave_guard("enemy_minion", frame_no)
+            return action
 
         target = self._opening_wave_guard_target(frame_state, frame_no, pos)
         if target is None:
@@ -795,9 +823,102 @@ class Agent(BaseAgent):
             self.opening_wave_guard_follow_count += 1
         return legal_move
 
+    def _maybe_opening_air_phase_action(self, observation, frame_no, main_hero=None):
+        if frame_no < self._opening_air_attack_start_frame(main_hero):
+            return None
+        if self._opening_air_attack_phase_done(main_hero):
+            return None
+        air_attack = self._maybe_opening_air_attack(observation, frame_no, main_hero)
+        if air_attack is not None:
+            return air_attack
+        return self._opening_hold_action(observation)
+
+    def _opening_air_attack_phase_done(self, main_hero=None):
+        return len(self.opening_air_attack_done_frames) >= self._opening_air_attack_count(main_hero)
+
+    def _maybe_opening_air_attack(self, observation, frame_no, main_hero=None):
+        attack_frame = None
+        for candidate in self._opening_air_attack_frames(main_hero):
+            candidate = int(candidate)
+            if candidate in self.opening_air_attack_done_frames:
+                continue
+            if int(frame_no) >= candidate:
+                attack_frame = candidate
+                break
+        if attack_frame is None:
+            return None
+
+        attack_action = [3, 15, 15, 15, 15, 0]
+        legal_attack = self._legalized_rule_action(observation, attack_action, active_heads=(5,))
+        if legal_attack is None or int(legal_attack[5]) != 0:
+            self.opening_air_attack_skip_count += 1
+            return None
+
+        self.opening_air_attack_done_frames.add(attack_frame)
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        self.opening_air_attack_count += 1
+        return legal_attack
+
+    def _opening_air_attack_start_frame(self, main_hero=None):
+        hero_id = self._hero_config_id(main_hero)
+        starts = getattr(GameConfig, "OPENING_AIR_ATTACK_START_FRAMES_BY_HERO", {}) or {}
+        return int(starts.get(hero_id, GameConfig.OPENING_WAVE_GUARD_AIR_ATTACK_START_FRAME))
+
+    def _opening_air_attack_count(self, main_hero=None):
+        hero_id = self._hero_config_id(main_hero)
+        counts = getattr(GameConfig, "OPENING_AIR_ATTACK_COUNTS_BY_HERO", {}) or {}
+        return int(counts.get(hero_id, len(GameConfig.OPENING_AIR_ATTACK_FRAMES)))
+
+    def _opening_air_attack_frames(self, main_hero=None):
+        start = self._opening_air_attack_start_frame(main_hero)
+        count = self._opening_air_attack_count(main_hero)
+        interval = int(GameConfig.OPENING_AIR_ATTACK_INTERVAL_FRAMES)
+        return [start + interval * idx for idx in range(count)]
+
+    def _opening_hold_action(self, observation):
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        self.opening_air_hold_count += 1
+        return [1, 8, 8, 8, 8, 0]
+
+    def _opening_hero_engage_action(self, observation):
+        berserk = self._opening_berserk_action(observation)
+        if berserk is not None:
+            self.rule_override_active = True
+            self.rule_override_count += 1
+            self.opening_berserk_trigger_count += 1
+            self.opening_enemy_hero_attack_pending = True
+            return berserk
+        self.opening_berserk_skip_count += 1
+        hero_attack = self._opening_enemy_hero_attack(observation)
+        return hero_attack
+
+    def _opening_berserk_action(self, observation):
+        for target in (2, 0):
+            preferred = [8, 8, 8, 8, 8, target]
+            action = self._legalized_rule_action(observation, preferred, active_heads=(5,))
+            if action is not None and int(action[5]) == target:
+                return action
+        return None
+
+    def _opening_enemy_hero_attack(self, observation):
+        self.opening_enemy_hero_attack_pending = False
+        attack = self._legalized_rule_action(observation, [3, 15, 15, 15, 15, 1], active_heads=(5,))
+        if attack is None or int(attack[5]) != 1:
+            self.opening_enemy_hero_attack_skip_count += 1
+            return None
+        self.rule_override_active = True
+        self.rule_override_count += 1
+        self.opening_enemy_hero_attack_count += 1
+        return attack
+
     def _reset_opening_wave_guard_track(self, clear_done=False):
         self.opening_wave_guard_active = False
         self.opening_wave_guard_camp = None
+        self.opening_air_attack_done_frames = set()
+        self.opening_enemy_hero_attack_pending = False
+        self.opening_hero_engage_done = False
         if clear_done:
             self.opening_wave_guard_done = False
 
@@ -822,40 +943,74 @@ class Agent(BaseAgent):
         return False
 
     def _opening_wave_guard_target(self, frame_state, frame_no, current_pos=None):
+        air_start_frame = self._opening_air_attack_start_frame(self._find_my_hero_and_tower(frame_state)[0])
+        if int(GameConfig.OPENING_WAVE_GUARD_WIDTH_PULL_FRAME) <= frame_no < air_start_frame:
+            return self._unproject_for_camp(
+                (
+                    float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
+                    float(GameConfig.OPENING_WAVE_GUARD_FOLLOW_WIDTH),
+                ),
+                self.opening_wave_guard_camp or self.hero_camp,
+            )
         if frame_no < int(GameConfig.OPENING_WAVE_GUARD_START_FRAME):
             current_width = float(current_pos[1]) if current_pos is not None else 0.0
             width_limit = float(GameConfig.OPENING_WAVE_GUARD_APPROACH_WIDTH_LIMIT)
             if abs(current_width) > width_limit:
                 current_width = width_limit if current_width > 0 else -width_limit
-            return self._unproject_own_perspective(
+            return self._unproject_for_camp(
                 (
                     float(GameConfig.OPENING_TOWER_TARGET_LANE),
                     current_width,
-                )
+                ),
+                self.opening_wave_guard_camp or self.hero_camp,
             )
-        if frame_no < int(GameConfig.OPENING_WAVE_GUARD_FOLLOW_FRAME):
-            return self._unproject_own_perspective(
+        if not self._opening_air_attack_phase_done(self._find_my_hero_and_tower(frame_state)[0]):
+            return self._unproject_for_camp(
                 (
                     float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE),
                     float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
-                )
+                ),
+                self.opening_wave_guard_camp or self.hero_camp,
             )
 
-        front_minion = self._front_own_minion(frame_state)
-        if front_minion is None:
-            target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
-        else:
-            front_pos = self._project_own_perspective(front_minion)
-            if front_pos is None:
-                target_lane = float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
-            else:
-                target_lane = float(front_pos[0]) - float(GameConfig.OPENING_WAVE_GUARD_BEHIND_MINION_DISTANCE)
-        return self._unproject_own_perspective(
+        current_lane = float(current_pos[0]) if current_pos is not None else float(GameConfig.OPENING_WAVE_GUARD_WAIT_LANE)
+        target_lane = current_lane + float(GameConfig.OPENING_WAVE_GUARD_FORWARD_DELTA)
+        return self._unproject_for_camp(
             (
                 target_lane,
-                float(GameConfig.OPENING_WAVE_GUARD_TARGET_WIDTH),
-            )
+                float(GameConfig.OPENING_WAVE_GUARD_FOLLOW_WIDTH),
+            ),
+            self.opening_wave_guard_camp or self.hero_camp,
         )
+
+    def _second_front_own_minion(self, frame_state):
+        minions = []
+        for npc in frame_state.get("npc_states", []) or []:
+            if not self._is_own_minion(npc):
+                continue
+            pos = self._project_for_camp(npc, self.opening_wave_guard_camp or self.hero_camp)
+            if pos is None:
+                continue
+            minions.append((float(pos[0]), npc))
+        if not minions:
+            return None
+        minions.sort(key=lambda item: item[0], reverse=True)
+        return minions[1][1] if len(minions) >= 2 else minions[0][1]
+
+    def _back_own_minion(self, frame_state):
+        back_minion = None
+        back_lane = None
+        for npc in frame_state.get("npc_states", []) or []:
+            if not self._is_own_minion(npc):
+                continue
+            pos = self._project_own_perspective(npc)
+            if pos is None:
+                continue
+            lane = float(pos[0])
+            if back_lane is None or lane < back_lane:
+                back_lane = lane
+                back_minion = npc
+        return back_minion
 
     def _front_own_minion(self, frame_state):
         front_minion = None
@@ -863,7 +1018,7 @@ class Agent(BaseAgent):
         for npc in frame_state.get("npc_states", []) or []:
             if not self._is_own_minion(npc):
                 continue
-            pos = self._project_own_perspective(npc)
+            pos = self._project_for_camp(npc, self.opening_wave_guard_camp or self.hero_camp)
             if pos is None:
                 continue
             lane = float(pos[0])
@@ -948,26 +1103,6 @@ class Agent(BaseAgent):
         frame_no = self._frame_no(frame_state)
         self._start_cleanse_retry(observation, main_hero, enemy_hero, frame_no, source)
         return observation
-
-    def _mask_skill2_button(self, observation):
-        legal_action = observation.get("legal_action", [])
-        if legal_action is None:
-            return observation
-        legal_len = len(legal_action)
-        if legal_len not in (Config.LEGAL_ACTION_DIM, Config.RAW_LEGAL_ACTION_DIM):
-            return observation
-        if int(legal_action[5] or 0) == 0:
-            return observation
-
-        if hasattr(legal_action, "copy"):
-            masked_legal_action = legal_action.copy()
-        else:
-            masked_legal_action = list(legal_action)
-        masked_legal_action[5] = 0
-
-        masked_observation = dict(observation)
-        masked_observation["legal_action"] = masked_legal_action
-        return masked_observation
 
     def _was_hit_by_enemy_ult(self, main_hero, enemy_hero, return_source=False):
         main_runtime = self._actor_runtime(main_hero)
@@ -1127,20 +1262,6 @@ class Agent(BaseAgent):
             return float(value)
         except (TypeError, ValueError):
             return default
-
-    def _legal_button_value(self, observation, button):
-        legal_action = observation.get("legal_action", []) if observation is not None else []
-        if legal_action is None:
-            return None
-        if hasattr(legal_action, "tolist"):
-            legal_action = legal_action.tolist()
-        button = int(button)
-        if button < 0 or button >= len(legal_action):
-            return None
-        try:
-            return int(legal_action[button] or 0)
-        except (TypeError, ValueError):
-            return None
 
     def _slot_succ_used(self, hero, target_slot):
         for slot in self._slot_states(hero):
@@ -1487,22 +1608,6 @@ class Agent(BaseAgent):
                     return True
         return False
 
-    def _enemy_minions_under_own_tower(self, frame_state, main_tower):
-        tower_pos = self._own_raw_location(main_tower)
-        if tower_pos is None:
-            return 0
-        tower_range = self._tower_attack_range(main_tower)
-        count = 0
-        for npc in frame_state.get("npc_states", []) or []:
-            if not self._is_enemy_minion(npc):
-                continue
-            npc_pos = self._own_raw_location(npc)
-            if npc_pos is None:
-                continue
-            if self._dist(tower_pos, npc_pos) <= tower_range:
-                count += 1
-        return count
-
     def _enemy_minion_in_lane_range(self, frame_state, lane_lo, lane_hi):
         lane_lo = float(lane_lo)
         lane_hi = float(lane_hi)
@@ -1581,20 +1686,6 @@ class Agent(BaseAgent):
         if sub_type is not None:
             return sub_type
         return self._get_any(actor or {}, ["sub_type", "subType"], None)
-
-    def _tower_attack_range(self, tower):
-        return float(
-            self._get_any(tower or {}, ["attack_range", "attackRange"], Args.TOWER_ATTACK_RANGE_FALLBACK)
-            or Args.TOWER_ATTACK_RANGE_FALLBACK
-        )
-
-    def _is_action_button_legal(self, observation, button):
-        legal_action = observation.get("legal_action", [])
-        if legal_action is None:
-            return False
-        if hasattr(legal_action, "tolist"):
-            legal_action = legal_action.tolist()
-        return 0 <= int(button) < len(legal_action) and int(legal_action[int(button)] or 0) == 1
 
     def _in_force_home_recover_cooldown(self, frame_no, hp_rate):
         if hp_rate < GameConfig.FORCE_HOME_HP_TRIGGER_PRE_CANNON:
@@ -1956,6 +2047,9 @@ class Agent(BaseAgent):
         return x, z
 
     def _project_own_perspective(self, obj_or_loc):
+        return self._project_for_camp(obj_or_loc, getattr(self, "force_home_camp", None) or self.hero_camp)
+
+    def _project_for_camp(self, obj_or_loc, camp):
         loc = obj_or_loc
         if obj_or_loc is not None and not isinstance(obj_or_loc, dict):
             return None
@@ -1971,17 +2065,20 @@ class Agent(BaseAgent):
         z = float(z)
         if abs(x) > Args.RAW_COORD_ABS_LIMIT or abs(z) > Args.RAW_COORD_ABS_LIMIT:
             return None
-        if self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp) == 2:
+        if self._camp_key(camp) == 2:
             x, z = -x, -z
         lane = (x + z) / Args.SQRT2
         width = (x - z) / Args.SQRT2
         return lane, width
 
     def _unproject_own_perspective(self, projected):
+        return self._unproject_for_camp(projected, getattr(self, "force_home_camp", None) or self.hero_camp)
+
+    def _unproject_for_camp(self, projected, camp):
         lane, width = float(projected[0]), float(projected[1])
         x = (lane + width) / Args.SQRT2
         z = (lane - width) / Args.SQRT2
-        if self._camp_key(getattr(self, "force_home_camp", None) or self.hero_camp) == 2:
+        if self._camp_key(camp) == 2:
             x, z = -x, -z
         return x, z
 
@@ -2043,22 +2140,14 @@ class Agent(BaseAgent):
                 own_cake_pos = pos
                 break
         if found_own:
-            self.own_cake_seen_once = True
             self.last_own_cake_pos = own_cake_pos
-            self.next_own_cake_frame = None
         if self.own_cake_exists and not found_own:
             main_pos = self._project_own_perspective(main_hero)
             cake_pos = self.last_own_cake_pos or self._cake_anchor(False)
             if main_pos is not None and self._dist(main_pos, cake_pos) <= GameConfig.CAKE_PICKUP_PROXIMITY:
                 self.last_cake_eaten_frame = int(frame_no or 0)
-            self.last_own_cake_disappear_frame = frame_no
-            self.next_own_cake_frame = frame_no + 2250
             self.last_own_cake_pos = None
         self.own_cake_exists = found_own
-
-    def _is_own_cake_unavailable_for_force_home(self, frame_state, frame_no, main_hero=None):
-        self._update_own_cake_state(frame_state, frame_no, main_hero)
-        return not self.own_cake_exists
 
     def _update_force_home_recover_state(self, main_hero, frame_no):
         if main_hero is None:

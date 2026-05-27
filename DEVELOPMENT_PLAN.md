@@ -791,3 +791,65 @@
 - Added `FORCE_HOME_CAKE_PROTECT_FRAMES=60` for ordinary low-HP force-home starts. After own cake pickup is detected, ordinary low-HP force-home is blocked for 60 frames; if HP is still below `20%` after that window, force-home may start normally.
 - Kept the post-kill force-home branch unchanged: it does not check own cake state or the cake protection window, and still follows its own post-kill lane/safety/`40%` HP gates.
 - Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed frame `+59` after cake pickup blocks ordinary low-HP force-home, frame `+60` allows it if still below `20%`, and post-kill force-home is not blocked by the cake window.
+
+### 11.80 2026-05-26 opening last-minion follow and early offense reward
+
+- Changed the `agent_diy` opening wave guard follow phase from following the front own minion at `1200` distance to following the back own minion at `1500` distance. The opening `forward` reward target was updated to the same back-minion target.
+- Added opening air-attack probes at frames `660/690/720/750` (`22/23/24/25s`): each frame attempts one legal `button=3,target=none` attack, skips if the official mask rejects target-none, then continues the opening follow rule.
+- Opening enemy-contact exits are now allowed only after frame `750`; timeout remains frame `840`. Added `early_own_half_hero_offense`, a small capped post-contact/pre-28s offense reward that triggers only when the enemy hero is visible with own-perspective `lane < -2500`.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\conf\monitor_builder.py agent_diy\feature\reward_process.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed last-minion `1500` follow, once-only air attacks, illegal air-attack skip then follow, no contact exit before `25s`, contact exit after `25s`, lane threshold gating, and damage reward scaling.
+
+### 11.81 2026-05-26 opponent pool update
+
+- Updated `agent_diy/conf/train_env_conf.toml` training opponents to mixed `selfplay/282422` with weights `0.70/0.30`.
+- Updated evaluation opponents to random `282422/278480`, and synced `kaiwu.json` model pool to `[282422, 278480]`.
+- Validation: parsed `agent_diy/conf/train_env_conf.toml` and `kaiwu.json` with Python and asserted the configured training pool, weights, evaluation pool, and model pool match the requested setup.
+
+### 11.82 2026-05-27 opening air-attack and berserk engage rewrite
+
+- Reworked `agent_diy` opening wave guard after `20s`: frames `600/630/660/690` now attempt four legal `button=3,target=none` air attacks, with center-move hold actions between attempts so the scripted phase does not trigger no-op streak penalties.
+- Follow phase now starts after the fourth air-attack attempt and targets the own minion with the second-largest own-perspective `lane`, using `lane - 1000` and fixed `width=2500`.
+- During follow, a visible enemy hero with own-perspective `lane < -2000` before or at frame `810` triggers a short hard-rule sequence: one legal berserk/summoner action if available, then one legal basic attack on the enemy hero, then opening-rule exit. Visible enemy heroes after frame `810`, enemy minions after frame `750`, and timeout at frame `840` still exit without the berserk engage sequence.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed four once-only air attacks, hold-before-follow behavior, second-largest-lane follow target, `27s`/`lane<-2000` berserk trigger, next-frame enemy-hero attack and exit, no trigger for shallow enemy lane, late hero exit, and reward target alignment.
+
+### 11.83 2026-05-27 opening rule correction after replay check
+
+- Aligned the four opening air attacks to frames `590/625/660/695` by moving the scripted air-attack phase start to frame `590` and delaying the follow stage to frame `701`, so the last attack attempt is not mixed with follow shaping.
+- Restored opening air-attack actions to the previously working target-only legalization path: preferred action `[3,15,15,15,15,0]`, with `_legalized_rule_action(..., active_heads=(5,))` required to preserve `target=0`. This keeps the scripted insert as a true normal-attack-air action and does not fall back to minion/hero targets.
+- The air-attack phase now consumes a scheduled attack only after the air attack is actually emitted. If the current frame rejects `button=3,target=0`, the rule stays in place, sends a stand-still hold `[1,8,8,8,8,0]`, and retries the same attack on the next step instead of silently losing one of the four attacks.
+- Made opening wave follow lane projection explicit to the current opening camp and changed the second-largest-lane minion follow target to `lane - 1000,width=2000`. Reward-side opening minion selection now also uses main-camp projection explicitly.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed four air attacks emit `[3,15,15,15,15,0]` at the requested frames when legal, failed attempts do not consume the attack count, hold frames emit `[1,8,8,8,8,0]`, and camp1/camp2 both target the second-largest-lane minion at `lane-1000,width=2000`.
+
+### 11.84 2026-05-27 opening 18s air-attack and front-minion follow
+
+- Moved the scripted air-attack phase to start at frame `540` (`18s`) with scheduled attempts `540/575/610/645`. The retry-until-success behavior is preserved: failed air attacks hold still and do not consume one of the four required attacks.
+- After four successful normal-attack-air actions, the opening follow target now uses the front own minion (`max own-perspective lane`) at `lane - 2500,width=3500`. The `forward` reward target was updated to the same front-minion target.
+- During follow, a visible enemy hero within raw distance `<8800` triggers the short hard-rule sequence: berserk if legal, then one fixed normal attack on the enemy hero, then opening-rule exit. Visible enemy minions now exit the opening rule immediately after the four air attacks are complete.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed 18s air-attack attempts, retry-with-standstill, front-minion `lane-2500,width=3500` follow for both camps, `<8800` berserk plus hero attack, no trigger at `10000` distance, and enemy-minion contact exit after the air phase.
+
+### 11.85 2026-05-27 opening width-pull and strict air-attack gate
+
+- Added a width-pull stage from frame `450` to `540` (`15s-18s`) targeting `lane=-16000,width=3500` before the air-attack phase.
+- Moved the four normal-attack-air attempts to `540/575/610/645` (`18s+`) and made the pre-follow gate strict: until all four air attacks have actually been emitted, the opening rule returns either an air attack or stand-still `[1,8,8,8,8,0]`, even if no-op is masked illegal, so it cannot fall through into follow early.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed the `15s-18s` width-pull target and no follow before four successful air attacks, including when both `button=3` and `button=1` are masked illegal.
+
+### 11.86 2026-05-27 hero-specific opening air attacks
+
+- Split opening air-attack counts by hero: Luban (`112`) starts at frame `540` and must complete `5` normal-attack-air actions; Di Renjie (`133`) starts at frame `510` and must complete `6`.
+- The follow phase no longer follows a minion. After the hero-specific air-attack count is complete, the rule targets current own-perspective position plus `lane + 2500` with fixed `width=3500`, then unprojects by the current camp. This keeps blue/red forward direction consistent.
+- Updated the opening `forward` reward target to the same current-position forward target. The scheduled reward follow start uses the last planned air-attack frame plus one frame (`681` for Luban, `686` for Di Renjie); the action rule itself remains stricter and follows only after the successful count is actually complete.
+- Validation: `python -m py_compile agent_diy\agent.py agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted probes confirmed Luban emits 5 attacks from `540`, Di Renjie emits 6 from `510`, Di Renjie does not follow after only 5 attacks, and both camps target `current_lane+2500,width=3500`.
+
+### 11.87 2026-05-27 opening trade pressure reward
+
+- Added `opening_trade_pressure`, a stronger opening-only pending-window reward for hero trades after the hero-specific air-attack phase. The trigger keeps the strict enemy-position gate requested for opening trades: enemy hero must be visible with own-perspective `lane < -2500`.
+- The reward starts a `90`-frame trade window on close enemy contact, enemy-hero attack intent, or `80110` use; it gives capped immediate rewards for visible contact, enemy-hero intent, and hero damage, then settles strong/good/bad/wasted-`80110` outcomes using accumulated damage, interaction count, min distance, and death evidence.
+- Added monitor/debug keys for opening trade starts, visible contact, intent, damage, `80110` success, good/strong/bad outcomes, wasted `80110`, and raw reward value.
+- Validation: `python -m py_compile agent_diy\conf\conf.py agent_diy\feature\reward_process.py agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; targeted reward probe confirmed `enemy_lane=-2000` gives no `opening_trade_pressure`, while `enemy_lane=-3000` after Luban's follow frame gives `0.11` with start, visible, intent, and damage debug flags, and a 3-hit `12%+` damage window settles as `good` for `+0.4`.
+
+### 11.88 2026-05-27 monitor panel cleanup
+
+- Split the mixed monitor panels into clearer diagnostic regions: `match_eval`, `rule_overview`, `rule_force_home`, `rule_opening`, `rule_direnjie_skill2`, `rule_luban_skill1`, `summoner_duel`, `recover_cake`, and `counterplay_cleanse`.
+- Removed constant panel metric `selected_summoner_80110` from the displayed monitor config while keeping the workflow-side generic selected-summoner export path intact for future multi-skill configurations.
+- Renamed displayed/exported force-home metric `force_home_no_emy_minion_cnt` to `force_home_no_enemy_minion_cnt`.
+- Validation: `python -m py_compile agent_diy\conf\monitor_builder.py agent_diy\workflow\train_workflow.py` passed; `Config.validate()` passed with `FEATURE_DIM=4833` and `SAMPLE_DIM=81312`; stubbed `MonitorConfigBuilder` probe confirmed 18 panels and 116 displayed metrics, with `selected_summoner_80110` absent and `force_home_no_enemy_minion_cnt` present under `rule_force_home`.
