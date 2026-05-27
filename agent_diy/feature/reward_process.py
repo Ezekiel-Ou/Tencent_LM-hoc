@@ -1503,21 +1503,22 @@ class GameRewardManager:
             self._pending_cake_interrupt = {"pickup_frame": frame_no} if success_detected else None
             return count
 
-        self._settle_pending_cake_interrupt(frame_no, hurt_by_enemy_hero)
+        count += self._settle_pending_cake_interrupt(frame_no, hurt_by_enemy_hero)
         return count
 
     def _settle_pending_cake_interrupt(self, frame_no, hurt_by_enemy_hero):
         pending = self._pending_cake_interrupt
         if pending is None:
-            return
+            return 0.0
         pickup_frame = int(pending.get("pickup_frame", frame_no))
         elapsed = frame_no - pickup_frame
         if 0 <= elapsed <= int(GameConfig.CAKE_INTERRUPT_FRAMES) and hurt_by_enemy_hero:
             self._cake_debug["cake_interrupted_count"] = 1
             self._pending_cake_interrupt = None
-            return
+            return -float(GameConfig.CAKE_INTERRUPT_PENALTY)
         if elapsed > int(GameConfig.CAKE_INTERRUPT_FRAMES):
             self._pending_cake_interrupt = None
+        return 0.0
 
     def _hurt_by_enemy_hero(self, main_hero, enemy_hero):
         enemy_runtime = self._actor_runtime(enemy_hero)

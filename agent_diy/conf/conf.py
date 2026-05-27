@@ -133,6 +133,7 @@ class GameConfig:
     CAKE_SMALL_GAIN_HP_RATIO = 0.03
     CAKE_MIN_SUCCESS_HP_GAIN = 100.0
     CAKE_WASTE_PENALTY = 0.30
+    CAKE_INTERRUPT_PENALTY = 0.20
     # 30 FPS: recover can be interrupted for 2s; cake recovery can be
     # interrupted for 3s after a confirmed successful pickup.
     RECOVER_INTERRUPT_FRAMES = 60
