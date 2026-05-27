@@ -138,6 +138,9 @@ class GameConfig:
     # interrupted for 3s after a confirmed successful pickup.
     RECOVER_INTERRUPT_FRAMES = 60
     CAKE_INTERRUPT_FRAMES = 90
+    # Recover interruption should be punished, but lighter than the positive
+    # success reward because failed heals already co-occur with hp_point loss.
+    RECOVER_INTERRUPT_PENALTY = 0.50
     # Opening lane-control shaping. This mirrors the opening wave guard:
     # reach the first-tower area, wait at lane center, then follow our first
     # wave from behind until enemy contact after 25s or timeout.
@@ -380,6 +383,7 @@ class GameConfig:
         "death": 0.0,
         "tower_hp_point": 0.0,
         "cleanse_success": 0.0,
+        "recover_skill_low_hp": 0.0,
         "minion_tower_push": 0.0,
         "enemy_dead_enemy_cake": 0.0,
         "enemy_minion_tower_front": 0.0,

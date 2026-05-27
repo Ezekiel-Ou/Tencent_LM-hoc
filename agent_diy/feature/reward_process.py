@@ -2456,7 +2456,7 @@ class GameRewardManager:
             if 0 <= elapsed <= int(GameConfig.RECOVER_INTERRUPT_FRAMES) and hurt_by_enemy_hero and not success:
                 self._pending_recover = None
                 self._recover_debug["recover_interrupted_count"] = 1
-                return 0
+                return -float(GameConfig.RECOVER_INTERRUPT_PENALTY)
             if elapsed > int(GameConfig.RECOVER_INTERRUPT_FRAMES):
                 self._pending_recover = None
         return 0
