@@ -909,7 +909,8 @@ class GameRewardManager:
         return {
             "enemy_minion_tower_front_count": 0.0,
             "enemy_minion_under_own_tower_count": 0.0,
-            "enemy_minion_defense_multiplier": 1.0,
+            "enemy_minion_defense_event_count": 0.0,
+            "enemy_minion_defense_multiplier": 0.0,
         }
 
     def _empty_river_crab_pressure_debug(self):
@@ -2060,6 +2061,7 @@ class GameRewardManager:
         self._enemy_minion_defense_debug = {
             "enemy_minion_tower_front_count": float(front_count),
             "enemy_minion_under_own_tower_count": float(under_count),
+            "enemy_minion_defense_event_count": 1.0,
             "enemy_minion_defense_multiplier": float(multiplier),
         }
         return front_value, under_value

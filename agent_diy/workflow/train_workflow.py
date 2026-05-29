@@ -255,6 +255,17 @@ class EpisodeRunner:
                                 monitor_data[f"reward_{reward_name}"] = round(reward_value, 4)
                             for debug_name, debug_value in reward_debug_sum_list[monitor_side].items():
                                 monitor_data[debug_name] = round(debug_value, 4)
+                            defense_event_count = float(
+                                reward_debug_sum_list[monitor_side].get("enemy_minion_defense_event_count", 0.0)
+                            )
+                            if defense_event_count > 0.0:
+                                defense_multiplier = float(
+                                    reward_debug_sum_list[monitor_side].get("enemy_minion_defense_multiplier", 0.0)
+                                ) / defense_event_count
+                            else:
+                                defense_multiplier = 0.0
+                            monitor_data["enemy_minion_defense_event_count"] = defense_event_count
+                            monitor_data["enemy_minion_defense_multiplier"] = round(defense_multiplier, 4)
                             for debug_name, debug_value in action_debug_sum_list[monitor_side].items():
                                 monitor_data[debug_name] = round(debug_value, 4)
                             selected_skill = self.selected_summoner_skills[monitor_side]
@@ -295,7 +306,7 @@ class EpisodeRunner:
                             monitor_data["opening_unstuck_count"] = float(
                                 getattr(self.agents[monitor_side], "opening_unstuck_count", 0)
                             )
-                            monitor_data["opening_wave_guard_exit_enemy_attack_count"] = float(
+                            monitor_data["opening_wave_guard_exit_enemy_atk_cnt"]       = float(
                                 getattr(
                                     self.agents[monitor_side],
                                     "opening_wave_guard_exit_enemy_attack_count",

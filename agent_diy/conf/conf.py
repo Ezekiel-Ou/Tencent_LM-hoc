@@ -173,6 +173,7 @@ class GameConfig:
         "direnjie_skill3_miss_count",
         "enemy_minion_tower_front_count",
         "enemy_minion_under_own_tower_count",
+        "enemy_minion_defense_event_count",
         "enemy_minion_defense_multiplier",
         "river_crab_pressure_count",
         "early_own_half_offense_intent_count",
@@ -310,7 +311,7 @@ class GameConfig:
     OPENING_AIR_ATTACK_START_FRAMES_BY_HERO = {112: 540, 133: 510}
     OPENING_AIR_ATTACK_COUNTS_BY_HERO = {112: 5, 133: 6}
     OPENING_AIR_ATTACK_INTERVAL_FRAMES = 35
-    OPENING_LUBAN_SWEEP_HOLD_FRAMES = 30
+    OPENING_LUBAN_SWEEP_HOLD_FRAMES = 31
     OPENING_WAVE_GUARD_FORWARD_DELTA = 2500.0
     OPENING_BERSERK_ENEMY_LANE_MAX = -2000.0
     OPENING_BERSERK_ENEMY_DISTANCE = 8800.0

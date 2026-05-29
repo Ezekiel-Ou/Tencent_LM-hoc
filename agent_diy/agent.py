@@ -987,12 +987,24 @@ class Agent(BaseAgent):
         return skill1
 
     def _opening_luban_engage_action(self, observation, frame_no):
+        step = int(self.opening_hero_engage_step or 0)
+        if step == 0:
+            berserk = self._opening_berserk_action(observation)
+            if berserk is None:
+                self.opening_berserk_skip_count += 1
+                return self._opening_rule_wait_action()
+            self.rule_override_active = True
+            self.rule_override_count += 1
+            self.opening_berserk_trigger_count += 1
+            self.opening_hero_engage_step = 1
+            return berserk
+
         hero_attack = self._opening_enemy_hero_attack(observation)
         if hero_attack is None:
             return self._opening_rule_wait_action()
         self.opening_luban_sweep_attack_count += 1
         self.opening_luban_sweep_start_frame = frame_no
-        self.opening_hero_engage_step = 1
+        self.opening_hero_engage_step = 2
         return hero_attack
 
     def _opening_luban_sweep_hold_action(self, frame_no, fallback_action):

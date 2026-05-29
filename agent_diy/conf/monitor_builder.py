@@ -75,6 +75,7 @@ def build_monitor():
     for metric_name, precision in (
         ("enemy_minion_tower_front_count", "0.01"),
         ("enemy_minion_under_own_tower_count", "0.01"),
+        ("enemy_minion_defense_event_count", "0.01"),
         ("enemy_minion_defense_multiplier", "0.01"),
         ("river_crab_pressure_count", "0.01"),
         ("early_own_half_offense_intent_count", "0.01"),
@@ -131,8 +132,6 @@ def build_monitor():
         "action_skill_count",
         "action_recover_count",
         "action_summoner_count",
-        "action_recall_count",
-        "action_equipment_count",
     ):
         config = _add_metric(config, metric_name, "0.01")
     config = config.end_panel()
@@ -142,7 +141,6 @@ def build_monitor():
         "skill_1_used_count",
         "skill_2_used_count",
         "skill_3_used_count",
-        "recover_used_count",
         "summoner_skill_used_count",
     ):
         config = _add_metric(config, metric_name, "0.01")
@@ -186,7 +184,7 @@ def build_monitor():
     config = config.add_panel(name="rule_opening", name_en="rule_opening", type="line")
     for metric_name in (
         "opening_unstuck_count",
-        "opening_wave_guard_exit_enemy_attack_count",
+        "opening_wave_guard_exit_enemy_atk_cnt",
         "opening_air_attack_count",
         "opening_air_attack_skip_count",
         "opening_air_hold_count",
@@ -207,7 +205,6 @@ def build_monitor():
         "cleanse_override_count",
         "skill2_blocked_count",
         "skill2_total_cast_count",
-        "skill2_cast_outside_window_count",
         "skill2_cleanse_rate",
     ):
         config = _add_metric(config, metric_name, "0.01")
